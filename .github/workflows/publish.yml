@@ -1,0 +1,95 @@
+name: Publish
+
+# Publishes facode-cli to npm when a GitHub Release is published.
+#
+# Authentication uses npm Trusted Publishing (OIDC) — no NPM_TOKEN secret and
+# no account OTP. One-time setup on npmjs.com:
+#   Package → facode-cli → Settings → Trusted Publisher → GitHub Actions
+#     Organization/user: fashishir
+#     Repository:        facode
+#     Workflow filename: publish.yml
+#     Environment:       (leave empty)
+#
+# Provenance is attached automatically for public repositories. The workflow
+# file name and repository must match the trusted publisher configuration, or
+# the OIDC exchange is rejected.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v0.4.2). Leave empty to use the default branch."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write # required for the OIDC token used by Trusted Publishing
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name || github.ref }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Trusted Publishing needs npm >= 11.5.1.
+      - name: Update npm
+        run: npm install --global npm@latest
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify tag matches package.json
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          TAG="${{ inputs.tag || github.event.release.tag_name }}"
+          if [ -n "$TAG" ] && [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::Tag $TAG does not match package.json version $VERSION (expected v$VERSION)"
+            exit 1
+          fi
+
+      - name: Verify version is not already published
+        run: |
+          if npm view "facode-cli@$VERSION" version >/dev/null 2>&1; then
+            echo "::error::facode-cli@$VERSION is already on npm; bump package.json first"
+            exit 1
+          fi
+
+      - name: Test
+        run: npm test
+
+      # prepack/prepublishOnly are skipped below, so build explicitly and
+      # publish exactly what the tests just covered.
+      - name: Build
+        run: npm run build
+
+      - name: Publish to npm
+        run: npm publish --provenance --access public --ignore-scripts
+
+      - name: Verify registry
+        run: npm view "facode-cli@$VERSION" version dist.integrity
+
+      - name: Summary
+        run: |
+          echo "### Published facode-cli@$VERSION" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "https://www.npmjs.com/package/facode-cli/v/$VERSION" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Provenance: https://www.npmjs.com/package/facode-cli/v/$VERSION#provenance" >> "$GITHUB_STEP_SUMMARY"
