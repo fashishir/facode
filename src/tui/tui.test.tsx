@@ -24,7 +24,7 @@ const tick = () => new Promise<void>((r) => setTimeout(r, 60));
 const waitFor = async (
   predicate: () => boolean | Promise<boolean>,
   what = "condition",
-  timeoutMs = 3000
+  timeoutMs = 10000
 ): Promise<void> => {
   const started = Date.now();
   for (;;) {
@@ -72,6 +72,25 @@ const pressUntil = async (
 // Strip ANSI/VT escape sequences (colors, sync markers ?2026h, cursor ?25l...)
 // so assertions match visible text only.
 const stripAnsi = (s: string) => s.replace(/\u001b\[[0-9;?]*[a-zA-Z]/g, "");
+
+/**
+ * Ink paints its first frame asynchronously. A fixed sleep passes locally but
+ * flakes on loaded CI runners, where the first paint can take hundreds of ms.
+ * Wait for visible text, then let the tree's useInput hooks subscribe.
+ */
+const waitForFrame = async (
+  getOut: () => string,
+  what = "first Ink frame",
+  timeoutMs = 10000
+): Promise<string> => {
+  let out = "";
+  await waitFor(() => {
+    out = getOut();
+    return stripAnsi(out).trim().length > 0;
+  }, what, timeoutMs);
+  await flushEffects();
+  return out;
+};
 
 const instances: InkInstance[] = [];
 
@@ -156,7 +175,7 @@ describe("LiveTurn", () => {
       { stdout, stdin }
     );
     instances.push(instance);
-    await tick();
+    await waitForFrame(getOut, "LiveTurn to render");
     const plain = stripAnsi(getOut());
     expect(plain).toContain("partial answer");
     expect(plain).toContain("thinking hard");
@@ -184,7 +203,7 @@ describe("InputBox", () => {
     const { stdout, stdin, getOut } = makeStreams();
     const instance = render(<InputBox onSubmit={(v) => submitted.push(v)} />, { stdout, stdin });
     instances.push(instance);
-    await tick();
+    await waitForFrame(getOut, "InputBox to render");
     stdin.write("hi");
     await tick();
     expect(stripAnsi(getOut())).toContain("hi");
@@ -202,7 +221,7 @@ describe("InputBox", () => {
       { stdout, stdin }
     );
     instances.push(instance);
-    await tick();
+    await waitForFrame(getOut, "InputBox to render");
     stdin.write("x\r");
     await tick();
     expect(stripAnsi(getOut())).not.toContain("x");
@@ -212,13 +231,13 @@ describe("InputBox", () => {
 
   it("supports backspace and up-arrow history", async () => {
     const submitted: string[] = [];
-    const { stdout, stdin } = makeStreams();
+    const { stdout, stdin, getOut } = makeStreams();
     const instance = render(
       <InputBox onSubmit={(v) => submitted.push(v)} history={["previous prompt"]} />,
       { stdout, stdin }
     );
     instances.push(instance);
-    await tick();
+    await waitForFrame(getOut, "InputBox to render");
     stdin.write("abc");
     await tick();
     stdin.write("\u007F"); // backspace removes "c"
@@ -250,7 +269,7 @@ describe("SelectList", () => {
       { stdout, stdin }
     );
     instances.push(instance);
-    await tick();
+    await waitForFrame(getOut, "SelectList to render");
     expect(stripAnsi(getOut())).toContain("Pick one");
     expect(stripAnsi(getOut())).toContain("alpha");
 
@@ -271,7 +290,7 @@ describe("SelectList", () => {
       { stdout, stdin }
     );
     instances.push(instance);
-    await tick();
+    await waitForFrame(getOut, "SelectList to render");
     const plain = stripAnsi(getOut());
     // Only a window of rows is rendered, with a count of what is below.
     expect(plain).toContain("model-00");
@@ -333,7 +352,11 @@ describe("ModelPicker", () => {
       { stdout, stdin }
     );
     instances.push(instance);
-    await tick();
+    await waitFor(
+      () => stripAnsi(getOut()).includes("free-model:free"),
+      "models to load"
+    );
+    await flushEffects();
     const plain = stripAnsi(getOut());
     expect(plain).toContain("free-model:free");
     expect(plain).toContain("(free)");
@@ -355,7 +378,7 @@ describe("ModelPicker", () => {
       })
     );
     const picked: string[] = [];
-    const { stdout, stdin } = makeStreams();
+    const { stdout, stdin, getOut } = makeStreams();
     const instance = render(
       <ModelPicker
         cwd={project}
@@ -367,7 +390,8 @@ describe("ModelPicker", () => {
       { stdout, stdin }
     );
     instances.push(instance);
-    await tick();
+    await waitFor(() => stripAnsi(getOut()).includes("current"), "models to load");
+    await flushEffects();
     stdin.write("\r");
     await tick();
     expect(picked).toEqual(["current"]);
@@ -386,7 +410,8 @@ describe("ModelPicker", () => {
       { stdout, stdin }
     );
     instances.push(instance);
-    await tick();
+    await waitFor(() => stripAnsi(getOut()).includes("HTTP 401"), "endpoint error to render");
+    await flushEffects();
     expect(stripAnsi(getOut())).toContain("HTTP 401");
 
     stdin.write("\r");
@@ -409,7 +434,7 @@ describe("ProviderForm", () => {
       { stdout, stdin }
     );
     instances.push(instance);
-    await tick();
+    await waitForFrame(getOut, "provider form to render");
     expect(stripAnsi(getOut())).toContain("Add a custom provider");
 
     stdin.write("myproxy");
@@ -442,13 +467,13 @@ describe("ProviderForm", () => {
 
   it("prefills the name (focus starts on the base URL) and accepts env: keys", async () => {
     const submitted: ProviderFormValues[] = [];
-    const { stdout, stdin } = makeStreams();
+    const { stdout, stdin, getOut } = makeStreams();
     const instance = render(
       <ProviderForm prefillName="myproxy" onCancel={() => {}} onSubmit={(v) => submitted.push(v)} />,
       { stdout, stdin }
     );
     instances.push(instance);
-    await tick();
+    await waitForFrame(getOut, "provider form to render");
 
     stdin.write("https://api.example.com/v1");
     await tick();
@@ -480,7 +505,7 @@ describe("ProviderForm", () => {
       { stdout, stdin }
     );
     instances.push(instance);
-    await tick();
+    await waitForFrame(getOut, "provider form to render");
 
     stdin.write("1bad name");
     await tick();
@@ -503,7 +528,7 @@ describe("ProviderForm", () => {
   it("cancels on Escape without submitting", async () => {
     const submitted: ProviderFormValues[] = [];
     let cancelled = 0;
-    const { stdout, stdin } = makeStreams();
+    const { stdout, stdin, getOut } = makeStreams();
     const instance = render(
       <ProviderForm
         onCancel={() => cancelled++}
@@ -512,7 +537,7 @@ describe("ProviderForm", () => {
       { stdout, stdin }
     );
     instances.push(instance);
-    await tick();
+    await waitForFrame(getOut, "provider form to render");
     stdin.write("http");
     await tick();
     stdin.write("\u001B");
@@ -598,14 +623,34 @@ describe("TuiApp provider/model overlays", () => {
     }
   };
 
+  // Wait for the app's first painted frame (the chat box) and for its useInput
+  // hooks to subscribe before typing. On a loaded CI runner the first paint can
+  // arrive well after render() returns, and keys written before that are lost.
+  const waitForInput = async (streams: ReturnType<typeof makeStreams>) => {
+    await waitFor(
+      () => stripAnsi(streams.getOut()).includes("FA Code... (/ for commands"),
+      "chat input to render"
+    );
+    await flushEffects();
+  };
+
+  // Type a slash command and wait until the input box echoes it, proving the
+  // component is subscribed to stdin before Enter is sent.
+  const typeCommand = async (streams: ReturnType<typeof makeStreams>, command: string) => {
+    streams.stdin.write(command);
+    await waitFor(
+      () => stripAnsi(streams.getOut()).includes(command),
+      `"${command}" to be typed into the input box`
+    );
+  };
+
   it("`/provider use` opens the picker and Enter switches the active provider", async () => {
     const streams = makeStreams();
     const instance = renderApp(streams);
     instances.push(instance);
-    await tick();
+    await waitForInput(streams);
 
-    streams.stdin.write("/provider use");
-    await tick();
+    await typeCommand(streams, "/provider use");
     streams.stdin.write("\r");
     await waitFor(
       () => stripAnsi(streams.getOut()).includes("Select a provider"),
@@ -645,10 +690,9 @@ describe("TuiApp provider/model overlays", () => {
     const streams = makeStreams();
     const instance = renderApp(streams);
     instances.push(instance);
-    await tick();
+    await waitForInput(streams);
 
-    streams.stdin.write("/provider add");
-    await tick();
+    await typeCommand(streams, "/provider add");
     streams.stdin.write("\r");
     await waitFor(
       () => stripAnsi(streams.getOut()).includes("Add a custom provider"),
@@ -712,10 +756,9 @@ describe("TuiApp provider/model overlays", () => {
     const streams = makeStreams();
     const instance = renderApp(streams);
     instances.push(instance);
-    await tick();
+    await waitForInput(streams);
 
-    streams.stdin.write("/model pick");
-    await tick();
+    await typeCommand(streams, "/model pick");
     streams.stdin.write("\r");
     await waitFor(
       () => stripAnsi(streams.getOut()).includes("Select a model"),
