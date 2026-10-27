@@ -1,4 +1,4 @@
-import { readJSON, writeJSON } from "@/utils";
+import { readJSON, writeJSON, type WriteResult } from "@/utils";
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
@@ -406,11 +406,11 @@ export function defaultSubagents(): Record<string, SubagentConfig> {
 
 export const HOME = homedir();
 
-export function saveConfig(cwd: string, cfg: FacodeConfig): void {
-  writeJSON(join(cwd, ".facode", "config.json"), cfg);
+export function saveConfig(cwd: string, cfg: FacodeConfig): WriteResult {
+  return writeJSON(join(cwd, ".facode", "config.json"), cfg);
 }
 
 /** Save to the user-level config (~/.facode/config.json) — applies everywhere. */
-export function saveUserConfig(cfg: FacodeConfig): void {
-  writeJSON(userConfigPath(), cfg);
+export function saveUserConfig(cfg: FacodeConfig): WriteResult {
+  return writeJSON(userConfigPath(), cfg);
 }

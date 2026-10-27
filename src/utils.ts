@@ -35,11 +35,28 @@ export function readJSON<T>(p: string, fallback: T): T {
   }
 }
 
-export function writeJSON(p: string, data: unknown): void {
+export interface WriteResult {
+  ok: boolean;
+  /** Human-readable failure reason; only set when `ok` is false. */
+  error?: string;
+}
+
+/**
+ * Write pretty-printed JSON.
+ *
+ * Returns a result instead of throwing so callers decide whether a failed
+ * save is fatal. Provider/model commands surface failures to the user:
+ * reporting "saved" for a file that was never written (read-only configs,
+ * permission errors, a directory at the target path) is worse than failing.
+ */
+export function writeJSON(p: string, data: unknown): WriteResult {
   try {
     ensureDir(dirname(p));
     writeFileSync(p, JSON.stringify(data, null, 2), "utf8");
-  } catch {}
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 export function expandHome(p: string): string {

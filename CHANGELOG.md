@@ -2,6 +2,32 @@
 
 All notable changes to `facode-cli` are documented here.
 
+## Unreleased
+
+### Fixed
+
+- `facode provider use <name>` accepts names the way people paste them:
+  surrounding whitespace and trailing sentence punctuation are ignored
+  (`apinex.` resolves to `apinex`), matching is case-insensitive, and a real
+  typo gets a `Did you mean "…"?` suggestion instead of a dead end.
+- Provider/model commands no longer print `✔ … saved` when the config write
+  failed. A read-only or otherwise unwritable config now produces an explicit
+  error and a non-zero exit code instead of silently doing nothing.
+- `/provider use` no longer marks the session's active provider when the switch
+  fails, so the status line cannot point at a provider that isn't selected.
+- `/model <name>` now writes the layer that currently pins the model: the
+  project config when it defines `model`, the user config otherwise. A project
+  pin can no longer silently override the choice. When `FACODE_MODEL` is set,
+  `/model` reports that the environment overrides the file instead of writing a
+  value that would have no effect.
+- Switching providers now warns when a model pinned in config will still be
+  sent to the new provider (with the `/model` fix), instead of leaving the
+  mismatch to fail as a provider-side 404.
+
+### Changed
+
+- Mutating provider/model subcommands exit non-zero when they report an error.
+
 ## 0.4.2 — 2026-10-27
 
 ### Added

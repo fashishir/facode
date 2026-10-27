@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtemp, mkdir, rm, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -302,8 +302,45 @@ describe("provider-commands", () => {
   });
 
   describe("useProvider", () => {
-    it("errors on an unknown provider", () => {
-      expect(useProvider(project, "nope-not-real")).toContain("Unknown provider");
+    it("errors on an unknown provider and suggests the nearest name", async () => {
+      addProvider({
+        name: "apinex",
+        baseURL: "https://api.apinex.bond/v1",
+        apiKey: "sk-abcdefghijklmnop1234",
+        model: "free/muse-spark-1.3",
+      });
+      const result = useProvider(project, "apinexx");
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain('Unknown provider "apinexx"');
+      expect(result.message).toContain('Did you mean "apinex"?');
+      expect(result.message).toContain("Available:");
+    });
+
+    it("accepts a pasted trailing period", async () => {
+      addProvider({
+        name: "apinex",
+        baseURL: "https://api.apinex.bond/v1",
+        apiKey: "sk-abcdefghijklmnop1234",
+        model: "free/muse-spark-1.3",
+      });
+      const result = useProvider(project, "apinex.", "user");
+      expect(result.ok).toBe(true);
+      expect(result.provider).toBe("apinex");
+      expect(result.message).toContain('✔ Active provider set to "apinex"');
+      expect(result.message).toContain('ignored the trailing "."');
+      expect((await userCfg()).activeProvider).toBe("apinex");
+    });
+
+    it("matches provider names ignoring case", async () => {
+      addProvider({
+        name: "apinex",
+        baseURL: "https://api.apinex.bond/v1",
+        apiKey: "sk-abcdefghijklmnop1234",
+      });
+      const result = useProvider(project, "APINEX", "user");
+      expect(result.ok).toBe(true);
+      expect(result.provider).toBe("apinex");
+      expect((await userCfg()).activeProvider).toBe("apinex");
     });
 
     it("persists activeProvider to the requested layer", async () => {
@@ -313,13 +350,13 @@ describe("provider-commands", () => {
         apiKey: "sk-abcdefghijklmnop1234",
         model: "m1",
       });
-      const out = useProvider(project, "pickme", "user");
+      const out = useProvider(project, "pickme", "user").message;
       expect(out).toContain('✔ Active provider set to "pickme"');
       expect(out).toContain("m1");
       const raw = await userCfg();
       expect(raw.activeProvider).toBe("pickme");
 
-      const out2 = useProvider(project, "pickme", "project");
+      const out2 = useProvider(project, "pickme", "project").message;
       expect(out2).toContain("project config");
       const praw = await projectCfg();
       expect(praw.activeProvider).toBe("pickme");
@@ -340,8 +377,44 @@ describe("provider-commands", () => {
         baseURL: "https://o.example.com/v1",
         apiKey: "sk-abcdefghijklmnop1234",
       });
-      const out = useProvider(project, "other", "user");
+      const out = useProvider(project, "other", "user").message;
       expect(out).toContain('pins activeProvider="pinprov"');
+    });
+
+    it("warns when a pinned model belongs to a different provider", async () => {
+      await mkdir(join(project, ".facode"), { recursive: true });
+      await writeFile(
+        join(project, ".facode", "config.json"),
+        JSON.stringify({ model: "nvidia/nemotron-3-ultra-550b-a55b:free" }),
+        "utf8"
+      );
+      addProvider({
+        name: "apinex",
+        baseURL: "https://api.apinex.bond/v1",
+        apiKey: "sk-abcdefghijklmnop1234",
+        model: "free/muse-spark-1.3",
+      });
+      const result = useProvider(project, "apinex", "user");
+      expect(result.ok).toBe(true);
+      expect(result.message).toContain("nvidia/nemotron-3-ultra-550b-a55b:free");
+      expect(result.message).toContain("free/muse-spark-1.3");
+      expect(result.message).toContain("facode model set free/muse-spark-1.3 --scope project");
+    });
+
+    it("fails loudly when the config cannot be written", async () => {
+      addProvider({
+        name: "writeprov",
+        baseURL: "https://w.example.com/v1",
+        apiKey: "sk-abcdefghijklmnop1234",
+      });
+      // The provider resolves from the user layer; a directory at the project
+      // config path makes the project-scope write fail with EISDIR on every
+      // platform without hiding the provider.
+      await mkdir(join(project, ".facode", "config.json"), { recursive: true });
+      const result = useProvider(project, "writeprov", "project");
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain("Could not set the active provider");
+      expect(result.message).toContain("NOT saved");
     });
   });
 

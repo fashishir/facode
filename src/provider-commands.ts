@@ -16,7 +16,7 @@ import {
   userConfigPath,
   validateProviderInput,
 } from "@/config";
-import { readJSON } from "@/utils";
+import { readJSON, type WriteResult } from "@/utils";
 
 /**
  * Provider/model management operations shared by the CLI subcommands
@@ -38,15 +38,100 @@ function rawProjectConfig(cwd: string): FacodeConfig {
   return readJSON<FacodeConfig>(join(cwd, ".facode", "config.json"), {});
 }
 
-function writeScopeLayer(scope: Scope, cwd: string, cfg: FacodeConfig): void {
-  if (scope === "user") saveUserConfig(cfg);
-  else saveConfig(cwd, cfg);
+function writeScopeLayer(scope: Scope, cwd: string, cfg: FacodeConfig): WriteResult {
+  return scope === "user" ? saveUserConfig(cfg) : saveConfig(cwd, cfg);
 }
 
 function scopeLabel(scope: Scope, cwd: string): string {
   return scope === "user"
     ? "user config (~/.facode/config.json)"
     : `project config (${join(cwd, ".facode", "config.json")})`;
+}
+
+function saveErrorMessage(action: string, scope: Scope, cwd: string, error?: string): string {
+  return [
+    `Could not ${action}: ${scopeLabel(scope, cwd)} is not writable.`,
+    `  ${error ?? "Unknown write error."}`,
+    `  The change was NOT saved.`,
+  ].join("\n");
+}
+
+/** Provider names are `[a-z][\w-]*`, so sentence punctuation can never be part of one. */
+const TRAILING_PUNCTUATION_RE = /[.,;:!?]+$/;
+
+/** Levenshtein distance, two-row form — only used for short provider names. */
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(
+        prev[j] + 1,
+        cur[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+      );
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+function nearestName(input: string, names: string[]): string | undefined {
+  const max = input.length <= 5 ? 1 : 2;
+  const lower = input.toLowerCase();
+  const prefix = names.find((n) => lower.startsWith(n.toLowerCase()) && lower.length > n.length);
+  if (prefix) return prefix;
+  let best: { name: string; distance: number } | undefined;
+  for (const name of names) {
+    const distance = editDistance(lower, name.toLowerCase());
+    if (distance <= max && (!best || distance < best.distance)) best = { name, distance };
+  }
+  return best?.name;
+}
+
+interface ProviderNameResolution {
+  /** Canonical registered name, when the input resolved. */
+  name?: string;
+  /** What was corrected, for display ("ignored trailing '.'", ...). */
+  note?: string;
+  /** Closest registered name for a genuine typo. */
+  suggestion?: string;
+}
+
+/**
+ * Resolve a provider name the way people actually type it: surrounding
+ * whitespace ignored, trailing sentence punctuation (".", ",", ...) ignored,
+ * then a case-insensitive fallback. A real typo gets a nearest-name
+ * suggestion instead of a dead end.
+ */
+export function resolveProviderName(
+  input: string,
+  presets: Record<string, ProviderPreset>
+): ProviderNameResolution {
+  const names = Object.keys(presets);
+  const trimmed = input.trim();
+  if (presets[trimmed]) return { name: trimmed };
+
+  const stripped = trimmed.replace(TRAILING_PUNCTUATION_RE, "");
+  if (stripped !== trimmed) {
+    if (presets[stripped]) {
+      return {
+        name: stripped,
+        note: `ignored the trailing ${JSON.stringify(trimmed.slice(stripped.length))} in the provider name`,
+      };
+    }
+    const suggestion = nearestName(stripped, names);
+    if (suggestion) return { suggestion };
+  }
+
+  const lower = trimmed.toLowerCase();
+  const ci = names.find((n) => n.toLowerCase() === lower);
+  if (ci) return { name: ci, note: `matched "${ci}" ignoring case in "${input}"` };
+
+  return { suggestion: nearestName(stripped || trimmed, names) };
 }
 
 export interface AddProviderInput {
@@ -89,7 +174,10 @@ export function addProvider(input: AddProviderInput): string {
     model: input.model ?? "",
   };
   raw.providers = providers;
-  writeScopeLayer(scope, cwd, raw);
+  const saved = writeScopeLayer(scope, cwd, raw);
+  if (!saved.ok) {
+    return saveErrorMessage(`add provider "${input.name}"`, scope, cwd, saved.error);
+  }
 
   return [
     `✔ Provider "${input.name}" ${overwrote ? "overwritten in" : "added to"} ${scopeLabel(scope, cwd)}.`,
@@ -163,7 +251,10 @@ export function updateProvider(input: UpdateProviderInput): string {
   }
 
   raw.providers![input.name] = next;
-  writeScopeLayer(scope, cwd, raw);
+  const saved = writeScopeLayer(scope, cwd, raw);
+  if (!saved.ok) {
+    return saveErrorMessage(`update provider "${input.name}"`, scope, cwd, saved.error);
+  }
 
   return [
     `✔ Provider "${input.name}" updated in ${scopeLabel(scope, cwd)}.`,
@@ -219,7 +310,10 @@ export function setFailover(
     maxAttempts: input.maxAttempts ?? 3,
   };
   raw.failover = next;
-  writeScopeLayer(scope, cwd, raw);
+  const saved = writeScopeLayer(scope, cwd, raw);
+  if (!saved.ok) {
+    return saveErrorMessage("update the failover policy", scope, cwd, saved.error);
+  }
   return [
     `✔ Failover policy updated in ${scopeLabel(scope, cwd)}.`,
     `  enabled:      ${next.enabled}`,
@@ -249,21 +343,40 @@ export function listProviderSetups(cwd: string = process.cwd()): string {
   ].join("\n");
 }
 
-export function useProvider(cwd: string, name: string, scope: Scope = "user"): string {
+export interface UseProviderResult {
+  ok: boolean;
+  /** Canonical registered name that was selected (set on success). */
+  provider?: string;
+  message: string;
+}
+
+export function useProvider(cwd: string, name: string, scope: Scope = "user"): UseProviderResult {
   const cfg = loadConfig(cwd);
   const presets = getProviderPresets(cfg);
-  if (!presets[name]) {
-    return `Unknown provider "${name}". Available: ${Object.keys(presets).join(", ")}`;
+  const resolution = resolveProviderName(name, presets);
+  if (!resolution.name) {
+    const available = Object.keys(presets).join(", ");
+    const hint = resolution.suggestion ? ` Did you mean "${resolution.suggestion}"?` : "";
+    return { ok: false, message: `Unknown provider "${name}".${hint} Available: ${available}` };
   }
 
+  const canonical = resolution.name;
   const raw = scope === "user" ? rawUserConfig() : rawProjectConfig(cwd);
-  raw.activeProvider = name;
-  writeScopeLayer(scope, cwd, raw);
+  raw.activeProvider = canonical;
+  const saved = writeScopeLayer(scope, cwd, raw);
+  if (!saved.ok) {
+    return {
+      ok: false,
+      message: saveErrorMessage(`set the active provider to "${canonical}"`, scope, cwd, saved.error),
+    };
+  }
 
   const notes: string[] = [];
+  if (resolution.note) notes.push(`  note: ${resolution.note}.`);
+
   if (scope === "user") {
     const projectRaw = rawProjectConfig(cwd);
-    if (projectRaw.activeProvider && projectRaw.activeProvider !== name) {
+    if (projectRaw.activeProvider && projectRaw.activeProvider !== canonical) {
       notes.push(
         `  note: this project's config pins activeProvider="${projectRaw.activeProvider}" — it wins inside this project (facode provider use ${projectRaw.activeProvider} --scope project to change).`
       );
@@ -272,12 +385,39 @@ export function useProvider(cwd: string, name: string, scope: Scope = "user"): s
 
   const merged = loadConfig(cwd);
   const resolved = resolveProviderOptions(merged);
-  return [
-    `✔ Active provider set to "${name}" (saved to ${scopeLabel(scope, cwd)}).`,
-    `  Model:    ${resolved.model || "(none — facode model set <model>)"}`,
-    `  Base URL: ${resolved.baseURL ?? "(default)"}`,
-    ...notes,
-  ].join("\n");
+  const preset = presets[canonical];
+
+  // A model pinned at any layer overrides the target provider's default. That
+  // is valid, but switching providers while keeping the old provider's model
+  // produces confusing provider-side 404s later — call it out with the fix.
+  if (preset.model && merged.model && merged.model !== preset.model) {
+    const projectModel = rawProjectConfig(cwd).model;
+    const userModel = rawUserConfig().model;
+    const source = process.env.FACODE_MODEL
+      ? "FACODE_MODEL"
+      : projectModel
+        ? "project config"
+        : userModel
+          ? "user config"
+          : "config";
+    const fixScope = source === "project config" ? " --scope project" : "";
+    notes.push(
+      `  note: model "${merged.model}" is pinned in ${source} and will be sent to ${canonical}` +
+        ` (its default is "${preset.model}").\n` +
+        `        Fix: /model pick  — or  facode model set ${preset.model}${fixScope}`
+    );
+  }
+
+  return {
+    ok: true,
+    provider: canonical,
+    message: [
+      `✔ Active provider set to "${canonical}" (saved to ${scopeLabel(scope, cwd)}).`,
+      `  Model:    ${resolved.model || "(none — facode model set <model>)"}`,
+      `  Base URL: ${resolved.baseURL ?? "(default)"}`,
+      ...notes,
+    ].join("\n"),
+  };
 }
 
 export function removeProvider(cwd: string, name: string, scope: Scope = "user"): string {
@@ -296,7 +436,10 @@ export function removeProvider(cwd: string, name: string, scope: Scope = "user")
     delete raw.activeProvider;
     removedActive = true;
   }
-  writeScopeLayer(scope, cwd, raw);
+  const saved = writeScopeLayer(scope, cwd, raw);
+  if (!saved.ok) {
+    return saveErrorMessage(`remove provider "${name}"`, scope, cwd, saved.error);
+  }
 
   const notes: string[] = [];
   if (removedActive) {
@@ -627,13 +770,33 @@ export async function pickModel(
 export function setModel(cwd: string, model: string, scope: Scope = "user"): string {
   const raw = scope === "user" ? rawUserConfig() : rawProjectConfig(cwd);
   raw.model = model;
-  writeScopeLayer(scope, cwd, raw);
+  const saved = writeScopeLayer(scope, cwd, raw);
+  if (!saved.ok) {
+    return saveErrorMessage(`set the model to "${model}"`, scope, cwd, saved.error);
+  }
   const resolved = resolveProviderOptions(loadConfig(cwd));
   return [
     `✔ Model set to "${model}" (saved to ${scopeLabel(scope, cwd)}).`,
     `  Provider: ${resolved.provider ?? "openai"}`,
     `  Base URL: ${resolved.baseURL ?? "(default)"}`,
   ].join("\n");
+}
+
+/**
+ * Set the model in the layer that currently wins. `/model` uses this so a
+ * project-level pin cannot silently override the user's choice: if the project
+ * config defines a model, update that layer; otherwise write the user layer.
+ * An environment override wins over both, so changing a file would be a no-op.
+ */
+export function setModelInActiveLayer(cwd: string, model: string): string {
+  if (process.env.FACODE_MODEL) {
+    return [
+      `FACODE_MODEL="${process.env.FACODE_MODEL}" is set in the environment and overrides config files.`,
+      `  Unset it to change the model, or start facode with FACODE_MODEL=${model}.`,
+    ].join("\n");
+  }
+  const scope: Scope = rawProjectConfig(cwd).model !== undefined ? "project" : "user";
+  return setModel(cwd, model, scope);
 }
 
 export function showModel(cwd: string = process.cwd()): string {

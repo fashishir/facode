@@ -11,7 +11,7 @@ import {
   listProviderModels,
   listProviderSetups,
   removeProvider,
-  setModel,
+  setModelInActiveLayer,
   showModel,
   testProvider,
   updateProvider,
@@ -143,7 +143,7 @@ const BUILTINS: SlashCommand[] = [
         return [
           showModel(ctx.cwd),
           "",
-          "Usage: /model <model-name>   (persists to ~/.facode/config.json)",
+          "Usage: /model <model-name>   (persists to the layer that sets your current model)",
           "       /model pick           (choose from the endpoint's models, free first)",
         ].join("\n");
       }
@@ -171,7 +171,7 @@ const BUILTINS: SlashCommand[] = [
         }
         return listProviderModels(ctx.cwd, target);
       }
-      return setModel(ctx.cwd, name, "user");
+      return setModelInActiveLayer(ctx.cwd, name);
     },
   },
   {
@@ -247,9 +247,12 @@ const BUILTINS: SlashCommand[] = [
             }
             return "Usage: /provider use <name>";
           }
-          const out = useProvider(ctx.cwd, name, "user");
-          ctx.setProvider(name);
-          return out;
+          const result = useProvider(ctx.cwd, name, "user");
+          // Only update the session's active provider when the switch actually
+          // succeeded — otherwise a typo leaves the status line (and the next
+          // turn's displayed provider) pointing at a provider that doesn't exist.
+          if (result.ok && result.provider) ctx.setProvider(result.provider);
+          return result.message;
         }
         case "remove": {
           const name = rest[0];
@@ -289,9 +292,9 @@ const BUILTINS: SlashCommand[] = [
         }
         default: {
           // Back-compat: /provider <name> switches, like `/provider use <name>`.
-          const out = useProvider(ctx.cwd, sub, "user");
-          if (out.startsWith("✔")) ctx.setProvider(sub);
-          return out;
+          const result = useProvider(ctx.cwd, sub, "user");
+          if (result.ok && result.provider) ctx.setProvider(result.provider);
+          return result.message;
         }
       }
     },

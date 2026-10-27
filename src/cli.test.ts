@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import { executeSlash, findSlashCommand, getSlashCommands } from "@/cli";
 import type { CommandContext } from "@/cli";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -138,6 +138,25 @@ describe("Slash provider/model management", () => {
     expect(raw.activeProvider).toBe("uprov");
   });
 
+  it("/provider use tolerates a pasted trailing period", async () => {
+    const ctx = await makeCtx();
+    await executeSlash("/provider add dotprov https://d.example.com/v1 sk-abcdefghijklmnop1234", ctx);
+    const res = await executeSlash("/provider use dotprov.", ctx);
+    expect(res).toContain('✔ Active provider set to "dotprov"');
+    expect(ctx.setProvider).toHaveBeenCalledWith("dotprov");
+    const raw = await userCfg();
+    expect(raw.activeProvider).toBe("dotprov");
+  });
+
+  it("/provider use does not switch the session on failure", async () => {
+    const ctx = await makeCtx();
+    const res = await executeSlash("/provider use ghost", ctx);
+    expect(res).toContain('Unknown provider "ghost"');
+    expect(ctx.setProvider).not.toHaveBeenCalled();
+    const raw = await readFile(join(userDir, "config.json"), "utf8").catch(() => "");
+    expect(raw).not.toContain("ghost");
+  });
+
   it("/provider <name> still switches (back-compat) and /provider list shows it", async () => {
     const ctx = await makeCtx();
     await executeSlash("/provider add bprov https://s.example.com/v1 sk-abcdefghijklmnop1234", ctx);
@@ -203,6 +222,37 @@ describe("Slash provider/model management", () => {
     expect(res).toContain('✔ Model set to "slash-model"');
     const raw = await userCfg();
     expect(raw.model).toBe("slash-model");
+  });
+
+  it("/model <name> updates a project-level pin instead of being overridden", async () => {
+    const ctx = await makeCtx();
+    await mkdir(join(ctx.cwd, ".facode"), { recursive: true });
+    await writeFile(
+      join(ctx.cwd, ".facode", "config.json"),
+      JSON.stringify({ model: "pinned-old" }),
+      "utf8"
+    );
+    const res = await executeSlash("/model pinned-new", ctx);
+    expect(res).toContain('✔ Model set to "pinned-new"');
+    expect(res).toContain("project config");
+    const praw = JSON.parse(await readFile(join(ctx.cwd, ".facode", "config.json"), "utf8"));
+    expect(praw.model).toBe("pinned-new");
+    // The user layer must not receive a value the project pin would shadow.
+    expect((await userCfg()).model).not.toBe("pinned-new");
+  });
+
+  it("/model refuses a write that FACODE_MODEL would override", async () => {
+    const ctx = await makeCtx();
+    const old = process.env.FACODE_MODEL;
+    process.env.FACODE_MODEL = "env-pinned";
+    try {
+      const res = await executeSlash("/model other-model", ctx);
+      expect(res).toContain("FACODE_MODEL");
+      expect(res).toContain("overrides config files");
+    } finally {
+      if (old === undefined) delete process.env.FACODE_MODEL;
+      else process.env.FACODE_MODEL = old;
+    }
   });
 
   it("/provider models lists the endpoint's models (free first)", async () => {

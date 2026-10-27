@@ -226,6 +226,16 @@ async function main() {
     return s;
   };
 
+  /**
+   * Print a mutating provider/model result. Those helpers report failures as
+   * strings (they are shared with the TUI, where throwing would tear down the
+   * UI), so the CLI maps a missing success marker to a non-zero exit code.
+   */
+  const report = (out: string): void => {
+    console.log(out);
+    if (!out.startsWith("✔")) process.exitCode = 1;
+  };
+
   const providerCmd = program
     .command("provider")
     .description("Manage LLM providers (add, list, use, test, remove)")
@@ -247,7 +257,7 @@ async function main() {
       // interactive path store an apiKeyEnv reference, not a copy.
       const apiKey = opts.apiKeyEnv ? `env:${opts.apiKeyEnv}` : opts.apiKey;
       if (name && opts.baseUrl && apiKey) {
-        console.log(addProvider({ name, baseURL: opts.baseUrl, apiKey, model: opts.model, scope, cwd, force: opts.force }));
+        report(addProvider({ name, baseURL: opts.baseUrl, apiKey, model: opts.model, scope, cwd, force: opts.force }));
         return;
       }
       if (!input.isTTY) {
@@ -261,7 +271,7 @@ async function main() {
         process.exitCode = 1;
         return;
       }
-      console.log(
+      report(
         await interactiveAddProvider({
           name,
           baseURL: opts.baseUrl,
@@ -281,16 +291,18 @@ async function main() {
     .command("use <name>")
     .description("Set the active provider (persists; --scope project for per-project)")
     .option("--scope <scope>", "Where to save: user or project")
-    .action((name: string, opts: { scope?: string }) =>
-      console.log(useProvider(projectCwd(), name, scopeOf(opts)))
-    );
+    .action((name: string, opts: { scope?: string }) => {
+      const result = useProvider(projectCwd(), name, scopeOf(opts));
+      console.log(result.message);
+      if (!result.ok) process.exitCode = 1;
+    });
 
   providerCmd
     .command("remove <name>")
     .description("Remove a custom provider (built-ins cannot be removed)")
     .option("--scope <scope>", "Where to remove from: user or project")
     .action((name: string, opts: { scope?: string }) =>
-      console.log(removeProvider(projectCwd(), name, scopeOf(opts)))
+      report(removeProvider(projectCwd(), name, scopeOf(opts)))
     );
 
   providerCmd
@@ -321,7 +333,7 @@ async function main() {
     .option("--max-attempts <n>", "Max models to try per turn", "3")
     .option("--scope <scope>", "Where to save: user or project", "user")
     .action((opts: { freeOnly?: boolean; maxAttempts?: string; scope?: string }) =>
-      console.log(
+      report(
         setFailover(
           { enabled: true, freeOnly: opts.freeOnly, maxAttempts: parseInt(opts.maxAttempts ?? "3", 10) || 3 },
           scopeOf(opts),
@@ -334,7 +346,7 @@ async function main() {
     .description("Turn auto-failover off (quota errors propagate to the user)")
     .option("--scope <scope>", "Where to save: user or project", "user")
     .action((opts: { scope?: string }) =>
-      console.log(setFailover({ enabled: false }, scopeOf(opts), projectCwd()))
+      report(setFailover({ enabled: false }, scopeOf(opts), projectCwd()))
     );
 
   providerCmd
@@ -357,7 +369,7 @@ async function main() {
         process.exitCode = 1;
         return;
       }
-      console.log(
+      report(
         updateProvider({
           name,
           baseURL: opts.baseUrl,
@@ -392,7 +404,7 @@ async function main() {
         process.exitCode = 1;
         return;
       }
-      console.log(setModel(cwd, model, scope));
+      report(setModel(cwd, model, scope));
     });
 
   modelCmd
