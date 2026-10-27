@@ -1,6 +1,5 @@
 import { z } from "zod";
 import { makeTool, type ToolContext, type ToolResult } from "@/tools/types";
-import { truncate } from "@/utils";
 import { relative, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 
@@ -55,7 +54,7 @@ export const globTool = makeTool({
       const { minimatch } = await import("minimatch");
       const matches: string[] = [];
       const walk = (dir: string, depth: number) => {
-        if (depth > 10) return;
+        if (depth > 20) return;
         let entries;
         try {
           entries = readdirSync(dir, { withFileTypes: true });
@@ -86,7 +85,7 @@ export const globTool = makeTool({
     const unique = Array.from(new Set(files)).sort();
     if (!unique.length) return { output: "(no matches found)" };
     const summary = `Found ${unique.length} matching file${unique.length === 1 ? "" : "s"}:\n`;
-    return { output: summary + truncate(unique.join("\n"), 8000) };
+    return { output: summary + unique.join("\n") };
   },
 });
 

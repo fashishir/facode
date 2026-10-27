@@ -4,14 +4,17 @@ import { ensureDir, writeJSON, formatBytes } from "@/utils";
 import {
   loadConfig,
   defaultSubagents,
+  resolveProviderOptions,
 } from "@/config";
 import {
   addProvider,
+  listProviderModels,
   listProviderSetups,
   removeProvider,
   setModel,
   showModel,
   testProvider,
+  updateProvider,
   useProvider,
 } from "@/provider-commands";
 import { stdin } from "node:process";
@@ -115,8 +118,8 @@ const BUILTINS: SlashCommand[] = [
   },
   {
     name: "model",
-    description: "Show current model, or set + persist one (/model <name>)",
-    args: "[model]",
+    description: "Show current model, set one (/model <name>), or pick from the endpoint (/model pick)",
+    args: "[model|pick]",
     async execute(args, ctx) {
       const name = args.trim();
       if (!name) {
@@ -124,7 +127,23 @@ const BUILTINS: SlashCommand[] = [
           showModel(ctx.cwd),
           "",
           "Usage: /model <model-name>   (persists to ~/.facode/config.json)",
+          "       /model pick           (list the endpoint's models, free first)",
         ].join("\n");
+      }
+      if (name === "pick") {
+        // Inside the TUI stdin belongs to Ink, so no interactive prompting —
+        // render the list instead; the CLI subcommand offers the live picker.
+        const cfg = loadConfig(ctx.cwd);
+        const resolved = resolveProviderOptions(cfg);
+        const target =
+          cfg.activeProvider ??
+          (cfg.provider && cfg.provider !== "openai" ? cfg.provider : undefined) ??
+          resolved.provider ??
+          "openai";
+        if (target === "custom") {
+          return "The active endpoint is a legacy custom config — use /model <model-name> directly.";
+        }
+        return listProviderModels(ctx.cwd, target);
       }
       return setModel(ctx.cwd, name, "user");
     },
@@ -152,8 +171,8 @@ const BUILTINS: SlashCommand[] = [
   },
   {
     name: "provider",
-    description: "Show, add, switch, test, or remove LLM providers",
-    args: "[add|list|use|remove|test] ...",
+    description: "Show, add, switch, test, update, or remove LLM providers",
+    args: "[add|list|use|remove|test|models|set] ...",
     async execute(args, ctx) {
       const parts = args.trim().split(/\s+/).filter(Boolean);
       const [sub, ...rest] = parts;
@@ -163,7 +182,8 @@ const BUILTINS: SlashCommand[] = [
           listProviderSetups(ctx.cwd),
           "",
           "Usage: /provider add <name> <baseURL> <apiKey> [model]",
-          "       /provider use|remove|test <name>",
+          "       /provider use|remove|test|models <name>",
+          "       /provider set <name> <baseURL> [apiKey] [model]",
         ].join("\n");
       }
 
@@ -200,6 +220,32 @@ const BUILTINS: SlashCommand[] = [
           const name = rest[0];
           if (!name) return "Usage: /provider test <name>";
           return testProvider(ctx.cwd, name);
+        }
+        case "models": {
+          const name = rest[0];
+          if (!name) return "Usage: /provider models <name>";
+          return listProviderModels(ctx.cwd, name);
+        }
+        case "set": {
+          // /provider set <name> <baseURL> [apiKey] [model] — partial update;
+          // omitting apiKey keeps the stored key. `env:VAR` keys are
+          // normalized into apiKeyEnv refs by updateProvider.
+          const [name, baseURL, apiKey, ...model] = rest;
+          if (!name || !baseURL) {
+            return [
+              "Usage: /provider set <name> <baseURL> [apiKey] [model]",
+              "Pass the current baseURL again to change only the key.",
+              "Built-ins (openai, deepseek, ...) cannot be modified.",
+            ].join("\n");
+          }
+          return updateProvider({
+            name,
+            baseURL,
+            apiKey,
+            model: model.join(" ") || undefined,
+            scope: "user",
+            cwd: ctx.cwd,
+          });
         }
         default: {
           // Back-compat: /provider <name> switches, like `/provider use <name>`.

@@ -67,12 +67,28 @@ facode provider use myproxy      # switch active provider (persists)
 facode provider test myproxy     # pings GET /models — verifies endpoint + key
 facode provider remove myproxy
 
+# Change an existing provider in place (partial update — only what you pass changes)
+facode provider set myproxy --base-url https://new.url/v1 --api-key sk-NEW --model new-model
+facode provider set myproxy --api-key sk-NEW            # rotate just the key
+facode provider set myproxy --api-key-env MY_PROXY_KEY  # rotate to an env reference
+
+# Registering a name that already exists is refused; overwrite explicitly
+facode provider add myproxy --base-url https://my.proxy/v1 --api-key sk-... --force
+
+# NEW: discover models from the endpoint itself (no chat-quota cost)
+facode provider models myproxy   # lists every model; `:free` ones grouped first
+facode model set --pick myproxy  # numbered interactive chooser (free models first)
+facode model set --pick          # same, for the active provider
+
 facode model set my-model        # set + persist the model
 facode model show                # resolved model / provider / base URL
 ```
 
 Add `--scope project` to any of the above to write the project's
-`.facode/config.json` instead of the user config.
+`.facode/config.json` instead of the user config. Inside the TUI:
+`/provider models <name>` lists models and `/model pick` renders the list for
+the active provider (the interactive chooser is CLI-only, since the TUI owns
+stdin).
 
 Minimal user config example (`~/.facode/config.json`):
 
@@ -86,8 +102,12 @@ With `OPENAI_API_KEY` in your environment, that's enough to work from any direct
 
 Switch providers at runtime with `/provider <name>` or per run with
 `facode --provider <name>`. You can also manage providers from inside the TUI:
-`/provider add <name> <baseURL> <apiKey> [model]`, `/provider list|use|remove|test`,
-and `/model <name>` to set one. The `providers` map in a config file works too:
+`/provider add <name> <baseURL> <apiKey> [model]`,
+`/provider set <name> <baseURL> [apiKey] [model]` (partial update — omitting the
+key keeps the stored one), `/provider list|use|remove|test|models`, and
+`/model <name>` to set one. The status line shows the active model + provider
+live and refreshes after every slash command. The `providers` map in a config
+file works too:
 
 ```json
 {

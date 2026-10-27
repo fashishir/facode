@@ -33,6 +33,8 @@ export interface FacodeConfig {
   mcpServers?: Record<string, McpServerConfig>;
   subagents?: Record<string, SubagentConfig>;
   skillsDir?: string;
+  /** Auto-failover to another model when the active one hits its quota. */
+  failover?: FailoverConfig;
 }
 
 export interface McpServerConfig {
@@ -49,12 +51,30 @@ export interface SubagentConfig {
   model?: string;
 }
 
+/**
+ * Failover policy: when the active model hits a quota/rate-limit error, FA Code
+ * silently switches to another model from the same endpoint and retries, so a
+ * free-tier cap never kills a session.
+ */
+export interface FailoverConfig {
+  /** Turn failover off entirely — quota errors propagate to the user. */
+  enabled?: boolean;
+  /**
+   * Only switch to `:free` models. When off (default), FA Code falls back to
+   * any model on the endpoint if no free alternative exists.
+   */
+  freeOnly?: boolean;
+  /** Max models to try per turn (unlimited). */
+  maxAttempts?: number;
+}
+
 const DEFAULTS: FacodeConfig = {
   provider: "openai",
   permissionMode: "default",
-  maxTokens: 8192,
-  contextWindow: 128_000,
-  compactionThreshold: 0.8,
+  maxTokens: 999_999_999,
+  contextWindow: 999_999_999,
+  compactionThreshold: 1.0,
+  failover: { enabled: true, freeOnly: false, maxAttempts: 999 },
 };
 
 /**
@@ -102,6 +122,39 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
  * projects that carry their own .facode/config.json.
  */
 export const PROVIDER_NAME_RE = /^[a-z][\w-]*$/i;
+
+/**
+ * True when a model id is a free-tier model. Different providers mark free
+ * models differently:
+ *   - OpenRouter / Token Harbor: `org/model:free`
+ *   - OpenCode / others:              `model-free`
+ *
+ * Both suffixes are recognized so failover and the model picker work across
+ * endpoints regardless of convention.
+ */
+export function isFreeModel(id: string): boolean {
+  const lower = id.toLowerCase();
+  return lower.endsWith(":free") || lower.endsWith("-free");
+}
+
+/**
+ * Filter an ordered list of candidate model ids through the failover policy.
+ *
+ * Discovery (which models the endpoint offers) happens in the provider layer,
+ * which can reach the endpoint; this is the pure policy piece:
+ *   - `freeOnly` restricts the list to free-tier ids (`:free` or `-free`)
+ *   - `maxAttempts` caps how many models are tried per turn
+ * Returns [] when failover is disabled.
+ */
+export function selectFailoverCandidates(
+  cfg: FacodeConfig,
+  candidates: string[]
+): string[] {
+  if (!cfg.failover?.enabled) return [];
+  const max = Math.max(1, cfg.failover.maxAttempts ?? 999);
+  const pool = cfg.failover.freeOnly ? candidates.filter((m) => isFreeModel(m)) : candidates;
+  return pool.slice(0, max);
+}
 
 /** Mask an API key for display: first 8 + "..." + last 4. */
 export function maskKey(key?: string): string {

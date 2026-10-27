@@ -174,6 +174,35 @@ src/
   `${baseURL}/models`. A provider resolved with an empty model now fails fast in
   `getProviderOptions()` with "No model configured." + hints (only custom
   providers added without a model can hit this; built-ins all carry defaults).
+- **Model discovery (v0.4.1)**: `fetchEndpointModels()` (shared by `provider test`,
+  `provider models`, `model set --pick`) GETs `${baseURL}/models` — read-only, no chat
+  quota. `:free`-suffixed ids (Token Harbor / OpenRouter convention) are grouped first.
+  `facode provider models <name>` lists all; `facode model set --pick [provider]` is a
+  numbered interactive chooser (TTY only, defaults to the active/resolved provider —
+  including the zero-config openai preset with OPENAI_BASE_URL). `/model pick` inside the
+  TUI must NOT prompt (Ink owns stdin) — it renders the plain list instead. The picker is
+  strict: only numbers from the list or exact ids (typo protection; custom ids go through
+  `model set <name>` directly).
+- **Provider updates (v0.4.2)**: `updateProvider()` partially updates a custom
+  provider in place — only passed fields change, omitted key/model/URL survive.
+  CLI: `facode provider set <name> [--base-url|--api-key|--api-key-env|--model]`
+  (no options → usage, exit 1). Slash: `/provider set <name> <baseURL> [apiKey]
+  [model]` (positional like `/provider add`; omitting apiKey keeps the stored
+  one). Built-in presets are refused ("built-in and cannot be modified" + hint
+  to register under a new name); unknown names error listing what IS registered.
+  Key rotation semantics: an `env:`/`--api-key-env` update stores an `apiKeyEnv`
+  ref and clears the plaintext; a plaintext update clears any `apiKeyEnv`
+  (presetApiKey prefers the env ref, so leaving both would strand the new key).
+  `addProvider` gained `force?: boolean` — `provider add ... --force` overwrites;
+  without it the refusal lists all three remediations (remove / provider set /
+  add --force).
+- **setProvider is display-only (v0.4.2)**: the TUI and bare-mode `setProvider`
+  callbacks used to re-save the MERGED config into the project layer — leaking
+  user values (and real API keys) into `.facode/config.json` on every
+  `/provider use`. Persistence lives solely in `useProvider`; the callbacks now
+  only update React state/status. The TUI status line shows live `model` +
+  `provider` segments, re-read from disk after every slash command (the banner
+  remains a startup snapshot, Claude Code style).
 - **Commander positional options gotcha (v0.4)**: by default, program-level options
   (`--model`, `--provider`, ...) are recognized ANYWHERE in the argv chain, so
   `facode provider add x --model m1` was silently swallowed by the root `--model`
@@ -219,3 +248,5 @@ src/
 - [x] Config robustness pass: user-level `~/.facode/config.json` layer, zero-config `openai` preset honors `OPENAI_BASE_URL`, CLI/env overrides no longer persist into project configs, `parseAsync` error propagation, friendly 401/429/connection-error messages with root causes.
 - [x] Packaging for npm as `facode-cli@0.3.0`: files whitelist, README.md + LICENSE, version-from-package.json, test exclusion from dist, prepublishOnly gate.
 - [x] Provider/model management (v0.4.0): `facode provider add|list|use|test|remove` + `facode model set|show` subcommands, `/provider add|list|use|remove|test` + settable `/model` slash commands, interactive `provider add` prompts (TTY), `--api-key-env` secret references, masked key display, "No model configured" guard, loadConfig deep-merge for record fields, 92 tests.
+- [x] Model discovery (v0.4.1): `facode provider models <name>` + `facode model set --pick [provider]` (interactive numbered chooser, free models first), `/provider models` + `/model pick` slash commands, shared `fetchEndpointModels()` (no chat-quota cost), verified live against Token Harbor (73 models, 4 free).
+- [x] Provider updates (v0.4.2): `facode provider set <name>` (partial update of base URL / key / model, built-in refusal, env-ref rotation) + `provider add --force` overwrite, `/provider set` slash command, TUI+bare `setProvider` made display-only (fixes merged-config/keys leaking into project config), live model+provider segments in the TUI status line.

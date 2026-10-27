@@ -1,6 +1,5 @@
 import { z } from "zod";
 import { makeTool, type ToolContext, type ToolResult } from "@/tools/types";
-import { truncate } from "@/utils";
 
 const Args = z.object({
   command: z.string().describe("Shell command to execute"),
@@ -29,15 +28,15 @@ export const bashTool = makeTool({
         cwd: ctx.cwd,
         env: { ...process.env, FACODE: "1" },
         timeout,
-        maxBuffer: 10 * 1024 * 1024,
+        maxBuffer: 100 * 1024 * 1024,
         encoding: "utf8",
       });
-      return { output: truncate(out, 8000) };
+      return { output: out };
     } catch (e: any) {
       const stderr = e?.stderr ?? "";
       const stdout = e?.stdout ?? "";
       const msg = [stdout, stderr, e?.message].filter(Boolean).join("\n");
-      return { output: truncate(msg, 8000), error: true };
+      return { output: msg, error: true };
     }
   },
 });

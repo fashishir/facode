@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Box, render, useApp, useInput } from "ink";
 import {
   ChatTranscript,
@@ -13,7 +13,7 @@ import { runAgentLoop } from "@/agent/loop";
 import { summarizeMessages } from "@/agent/compaction";
 import { compactSession, loadSession, appendSession } from "@/session/store";
 import { executeSlash } from "@/cli";
-import { defaultSystemPrompt, loadConfig, saveConfig } from "@/config";
+import { defaultSystemPrompt, loadConfig, resolveProviderOptions } from "@/config";
 import { loadPermissions, savePermissions, decide, type PermissionMode } from "@/permissions";
 
 export interface TuiAppProps {
@@ -63,6 +63,17 @@ export function TuiApp(props: TuiAppProps) {
   const [activeProvider, setActiveProvider] = useState(
     props.provider ?? cfg.activeProvider ?? cfg.provider ?? "openai"
   );
+  // Live model display for the status line (refreshed after slash commands —
+  // the banner above stays a startup snapshot, Claude Code style).
+  const [activeModel, setActiveModel] = useState(
+    resolveProviderOptions(cfg).model || cfg.model || ""
+  );
+  // Auto-failover can switch the active model mid-turn when the previous one
+  // hits a quota/rate-limit error; the status line reflects the current model.
+  const onModelSwitch = useCallback((from: string, to: string) => {
+    setActiveModel(to);
+    setStatus(`Switched model (quota): ${from} → ${to}`);
+  }, []);
 
   const getHistory = props.getHistory ?? (() => historyRef.current);
 
@@ -204,10 +215,11 @@ export function TuiApp(props: TuiAppProps) {
             savePermissions(props.cwd, permStateRef.current);
           },
           setProvider: (name) => {
+            // Display-only. Persistence already happened in useProvider
+            // (provider-commands) with the correct per-layer write; saving the
+            // MERGED config here used to leak user values — including real API
+            // keys — into the project's .facode/config.json.
             setActiveProvider(name);
-            const cfg = loadConfig(props.cwd);
-            cfg.activeProvider = name as any;
-            saveConfig(props.cwd, cfg);
             setStatus(`Provider: ${name}`);
           },
           permissionMode,
@@ -230,6 +242,14 @@ export function TuiApp(props: TuiAppProps) {
           persistNew(next);
           setStatus("Ready");
         }
+        // Slash commands may change the provider (/provider use) or the model
+        // (/model <name>): re-read the config so the status line shows the
+        // active pair live.
+        const fresh = loadConfig(props.cwd);
+        setActiveProvider(
+          props.provider ?? fresh.activeProvider ?? fresh.provider ?? "openai"
+        );
+        setActiveModel(resolveProviderOptions(fresh).model || fresh.model || "");
       } catch (e: any) {
         setStatus(`Error: ${e?.message ?? e}`);
       }
@@ -269,6 +289,7 @@ export function TuiApp(props: TuiAppProps) {
           setActiveTool(undefined);
           setStatus(result.error ? `${tool} failed` : `${tool} finished`);
         },
+        onModelSwitch,
         onTurnEnd: (msgs: Message[]) => {
           // Clear the live-stream area first, in the same batch as the history
           // update, so the finished message appears exactly once (in the
@@ -337,6 +358,8 @@ export function TuiApp(props: TuiAppProps) {
         thinking={isThinking}
         permissionMode={permissionMode}
         turnCount={messages.length}
+        model={activeModel || undefined}
+        provider={activeProvider}
         reaStatus={mcpReady ? `● ${toolCount} tools` : "○ connecting"}
       />
     </Box>

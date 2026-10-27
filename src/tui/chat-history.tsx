@@ -76,7 +76,7 @@ function BannerStatic({ banner }: { banner: BannerData }) {
       <Box justifyContent="space-between">
         <Box>
           <Text color="cyan.bold">FA CODE </Text>
-          <Text color="gray.dim">v{banner.version ?? "0.4.0"} • Claude Code CLI with REA Engine</Text>
+          <Text color="gray.dim">v{banner.version ?? "0.4.2"} • Claude Code CLI with REA Engine</Text>
         </Box>
         {gitBranch && (
           <Box>

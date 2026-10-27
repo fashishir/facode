@@ -1,6 +1,5 @@
 import { z } from "zod";
 import { makeTool, type ToolContext, type ToolResult } from "@/tools/types";
-import { truncate } from "@/utils";
 import { resolve, relative, extname } from "node:path";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 
@@ -44,7 +43,7 @@ const BINARY_EXTS = new Set([
 ]);
 
 function walk(dir: string, depth: number, out: string[]): void {
-  if (depth > 10) return;
+  if (depth > 20) return;
   let entries;
   try {
     entries = readdirSync(dir, { withFileTypes: true });
@@ -111,15 +110,13 @@ export const grepTool = makeTool({
           matches.push(`${relPath}:${i + 1}: ${lines[i].trimEnd()}`);
           matchedFiles.add(relPath);
           matchCount++;
-          if (matchCount >= 200) break;
         }
       }
-      if (matchCount >= 200) break;
     }
 
     if (!matches.length) return { output: "(no matches found)" };
     const summary = `Found ${matchCount} match${matchCount === 1 ? "" : "es"} in ${matchedFiles.size} file${matchedFiles.size === 1 ? "" : "s"}:\n\n`;
-    return { output: summary + truncate(matches.join("\n"), 10000) };
+    return { output: summary + matches.join("\n") };
   },
 });
 

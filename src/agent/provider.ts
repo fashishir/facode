@@ -1,7 +1,14 @@
 import type OpenAI from "openai";
 import type { Role, Message, ToolCall, StreamCallbacks } from "@/agent/types";
 import { toInputSchema } from "@/tools/types";
-import { loadConfig, maskKey, resolveProviderOptions } from "@/config";
+import {
+  isFreeModel,
+  loadConfig,
+  maskKey,
+  resolveProviderOptions,
+  selectFailoverCandidates,
+  type FacodeConfig,
+} from "@/config";
 
 // The `openai` SDK (~265ms import cost) is loaded lazily on the first client
 // creation so CLI startup (parsers, TUI render) is not blocked by it.
@@ -20,6 +27,17 @@ export interface ProviderOptions {
   baseURL?: string;
   apiKey?: string;
   maxTokens?: number;
+  /**
+   * Auto-failover: ordered candidate models to try when the active model is
+   * rate-limited. `onSwitch` is called (with the old→new model) whenever a
+   * switch happens, so the host can surface it in the UI.
+   */
+  failover?: {
+    candidates: string[];
+    onSwitch?: (from: string, to: string) => void;
+    /** FacodeConfig — the failover policy (enabled/freeOnly/maxAttempts). */
+    cfg: FacodeConfig;
+  };
 }
 
 export interface CompletionResult {
@@ -43,6 +61,43 @@ export async function createCompletion(
     options.apiKey
   );
 
+  // Auto-failover: when the active model hits a quota/rate-limit error, FA Code
+  // silently switches to another model from the same endpoint and retries, so a
+  // free-tier cap never kills a session. Candidates are discovered lazily on the
+  // first quota error (one `/models` fetch, no chat quota) and consumed one at a
+  // time. The switch is in-memory for the turn only — the configured model is
+  // untouched, so a fresh session starts clean.
+  let activeModel = options.model;
+  let candidates: string[] | null = null;
+
+  for (;;) {
+    try {
+      return await streamCompletion(client, messages, { ...options, model: activeModel }, tools, callbacks);
+    } catch (e: any) {
+      if (!isQuotaError(e)) throw e;
+      if (candidates === null) {
+        candidates = await getFailoverCandidates(
+          options.baseURL ?? "",
+          options.apiKey,
+          activeModel,
+          options.failover?.cfg ?? loadConfig()
+        );
+      }
+      const next = candidates.shift();
+      if (!next) throw e; // no fallback available — surface the original error
+      options.failover?.onSwitch?.(activeModel, next);
+      activeModel = next;
+    }
+  }
+}
+
+async function streamCompletion(
+  client: OpenAI,
+  messages: Message[],
+  options: ProviderOptions,
+  tools: ReturnType<typeof toInputSchema>[],
+  callbacks: StreamCallbacks
+): Promise<CompletionResult> {
   const stream = await createStream(client, messages, options, tools);
 
   let content = "";
@@ -91,6 +146,51 @@ export async function createCompletion(
   };
 }
 
+/**
+ * True when the SDK error means the active model can't serve the request right
+ * now and another model on the same endpoint might. Covers the OpenAI 429
+ * shape plus the natural-language variants proxies (Token Harbor, OpenRouter,
+ * LiteLLM, ...) return: "quota", "rate limit", "exhausted", "usage limit".
+ *
+ * Deliberately narrow — a 401 (bad key) or 404 (model gone) is a config
+ * problem, not a failover candidate, and retrying would just waste attempts.
+ */
+export function isQuotaError(e: any): boolean {
+  if (e?.status === 429) return true;
+  const msg = (e?.message ?? "").toLowerCase();
+  return (
+    /\bquota\b/.test(msg) ||
+    /rate[-_\s]?limit/.test(msg) ||
+    /\bexhausted\b/.test(msg) ||
+    /usage[-_\s]?limit/.test(msg)
+  );
+}
+
+/**
+ * Discover failover candidates for an endpoint: every model it offers except
+ * the active one, `:free` first. Hits the endpoint's `/models` (no chat quota).
+ * Returns [] when failover is disabled or nothing can be discovered.
+ */
+export async function getFailoverCandidates(
+  baseURL: string,
+  apiKey: string | undefined,
+  activeModel: string,
+  cfg: FacodeConfig
+): Promise<string[]> {
+  if (!baseURL) return [];
+  const models = await getAvailableModels(baseURL, apiKey);
+  if (!models.length) return [];
+  const active = activeModel.toLowerCase();
+  const free = models.filter(
+    (m) => m.toLowerCase() !== active && isFreeModel(m)
+  );
+  const rest = models.filter(
+    (m) =>
+      m.toLowerCase() !== active && !isFreeModel(m)
+  );
+  return selectFailoverCandidates(cfg, [...free, ...rest]);
+}
+
 export async function getAvailableModels(baseURL?: string, apiKey?: string): Promise<string[]> {
   try {
     const client = await createClient(baseURL, apiKey);
@@ -114,9 +214,9 @@ async function createStream(
       messages: messages as any,
       tools: tools.length ? (tools as any) : undefined,
       tool_choice: tools.length ? ("auto" as const) : undefined,
-      max_tokens: options.maxTokens ?? 8192,
       stream: true,
       temperature: 0.1,
+      ...(options.maxTokens && options.maxTokens < 999_999_999 ? { max_tokens: options.maxTokens } : {}),
     });
   } catch (e: any) {
     const msg = e?.message ?? String(e);

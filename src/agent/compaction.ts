@@ -38,9 +38,9 @@ export async function compactMessages(
 export async function summarizeMessages(
   messages: Message[],
   cwd: string,
-  maxTranscriptChars = 60_000
+  maxTranscriptChars?: number
 ): Promise<string> {
-  const transcript = messages
+  const transcriptRaw = messages
     .map((m) => {
       const text = typeof m.content === "string" ? m.content : "";
       const toolInfo = m.tool_calls?.length
@@ -48,8 +48,9 @@ export async function summarizeMessages(
         : "";
       return `${m.role}: ${text}${toolInfo}`;
     })
-    .join("\n")
-    .slice(0, maxTranscriptChars);
+    .join("\n");
+
+  const transcript = maxTranscriptChars ? transcriptRaw.slice(0, maxTranscriptChars) : transcriptRaw;
 
   const { content } = await createCompletion(
     [

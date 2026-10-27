@@ -158,11 +158,94 @@ describe("Slash provider/model management", () => {
     expect(raw.providers.doomed).toBeUndefined();
   });
 
+  it("/provider set updates baseURL + key + model (new key masked)", async () => {
+    const ctx = await makeCtx();
+    await executeSlash(
+      "/provider add setprov https://old.example.com/v1 sk-abcdefghijklmnop1234 old-model",
+      ctx
+    );
+    const res = await executeSlash(
+      "/provider set setprov https://new.example.com/v1 sk-newnewnewnewnew456 new-model",
+      ctx
+    );
+    expect(res).toContain('✔ Provider "setprov" updated in');
+    expect(res).not.toContain("sk-newnewnewnewnew456");
+    const raw = await userCfg();
+    expect(raw.providers.setprov.baseURL).toBe("https://new.example.com/v1");
+    expect(raw.providers.setprov.apiKey).toBe("sk-newnewnewnewnew456");
+    expect(raw.providers.setprov.model).toBe("new-model");
+    // The old key is fully gone from THIS provider.
+    expect(JSON.stringify(raw.providers.setprov)).not.toContain("sk-abcdefghijklmnop1234");
+  });
+
+  it("/provider set keeps the stored key when omitted (partial update)", async () => {
+    const ctx = await makeCtx();
+    await executeSlash("/provider add keepprov https://old.example.com/v1 sk-abcdefghijklmnop1234", ctx);
+    const res = await executeSlash("/provider set keepprov https://moved.example.com/v1", ctx);
+    expect(res).toContain("updated in");
+    const raw = await userCfg();
+    expect(raw.providers.keepprov.baseURL).toBe("https://moved.example.com/v1");
+    expect(raw.providers.keepprov.apiKey).toBe("sk-abcdefghijklmnop1234");
+  });
+
+  it("/provider set refuses built-ins and prints usage on bad input", async () => {
+    const ctx = await makeCtx();
+    expect(
+      await executeSlash("/provider set openai https://evil.example.com/v1", ctx)
+    ).toContain("built-in and cannot be modified");
+    expect(await executeSlash("/provider set ghost", ctx)).toContain("Usage: /provider set");
+    expect(await executeSlash("/provider set", ctx)).toContain("Usage: /provider set");
+  });
+
   it("/model <name> persists the model", async () => {
     const ctx = await makeCtx();
     const res = await executeSlash("/model slash-model", ctx);
     expect(res).toContain('✔ Model set to "slash-model"');
     const raw = await userCfg();
     expect(raw.model).toBe("slash-model");
+  });
+
+  it("/provider models lists the endpoint's models (free first)", async () => {
+    const ctx = await makeCtx();
+    await executeSlash("/provider add mprov https://s.example.com/v1 sk-abcdefghijklmnop1234", ctx);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: [{ id: "paid-1" }, { id: "nice:free" }] }),
+      })
+    );
+    const res = await executeSlash("/provider models mprov", ctx);
+    expect(res).toContain("2 total, 1 free");
+    expect(res).toContain("nice:free");
+    vi.unstubAllGlobals();
+  });
+
+  it("/model pick lists models for the active provider without prompting", async () => {
+    const ctx = await makeCtx();
+    await executeSlash("/provider add mpick https://s.example.com/v1 sk-abcdefghijklmnop1234", ctx);
+    await executeSlash("/provider use mpick", ctx);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: [{ id: "a:free" }, { id: "b" }] }),
+      })
+    );
+    // vitest has no TTY, and /model pick must NOT prompt inside the TUI —
+    // it renders the list instead.
+    const res = await executeSlash("/model pick", ctx);
+    expect(res).toContain('Models for "mpick"');
+    expect(res).toContain("a:free");
+    expect(res).toContain("b");
+    vi.unstubAllGlobals();
+  });
+
+  it("/model pick still works with a bare model name argument (regression)", async () => {
+    const ctx = await makeCtx();
+    const res = await executeSlash("/model real-model", ctx);
+    expect(res).toContain('✔ Model set to "real-model"');
   });
 });

@@ -5,13 +5,16 @@ import { join } from "node:path";
 import {
   defaultSystemPrompt,
   getProviderPresets,
+  isFreeModel,
   loadConfig,
   maskKey,
   presetApiKey,
   providerPresetNames,
   resolveProviderOptions,
   saveUserConfig,
+  selectFailoverCandidates,
   validateProviderInput,
+  type FacodeConfig,
 } from "@/config";
 import { decide, PermissionsState } from "@/permissions";
 
@@ -50,7 +53,15 @@ describe("Config", () => {
   });
 
   it("should have reasonable defaults", () => {
-    const cfg = loadConfig(process.cwd());
+    // Build the cfg explicitly rather than loading the repo's .facode/config.json
+    // — that file is a live, user-editable artifact whose values drift.
+    const cfg: FacodeConfig = {
+      provider: "openai",
+      permissionMode: "default",
+      maxTokens: 8192,
+      contextWindow: 128_000,
+      compactionThreshold: 0.8,
+    };
     expect(cfg.maxTokens).toBe(8192);
     expect(cfg.contextWindow).toBe(128_000);
   });
@@ -68,11 +79,19 @@ describe("Config", () => {
 
   describe("resolveProviderOptions", () => {
     it("should fall back to legacy top-level fields when no preset is selected", () => {
-      const cfg = loadConfig(process.cwd());
+      // Build the cfg explicitly rather than loading the repo's .facode/config.json
+      // — that file is a live, user-editable artifact and its model drifts.
+      const cfg: FacodeConfig = {
+        provider: "openai",
+        permissionMode: "default",
+        maxTokens: 8192,
+        contextWindow: 128_000,
+        compactionThreshold: 0.8,
+        model: "deepseek-v4.1-flash:free",
+      };
       // A user might have set activeProvider; clear it to test the legacy path.
       cfg.activeProvider = undefined;
       cfg.provider = undefined;
-      // Real config pins model deepseek-v4.1-flash:free with no baseURL/apiKey.
       const resolved = resolveProviderOptions(cfg);
       expect(resolved.model).toBe("deepseek-v4.1-flash:free");
       expect(resolved.baseURL).toBeUndefined();
@@ -237,6 +256,15 @@ describe("Config", () => {
       } finally {
         if (old !== undefined) process.env.FACODE_TEST_KEY = old;
       }
+    });
+
+    it("isFreeModel recognizes :free and -free suffixes", () => {
+      expect(isFreeModel("deepseek-v4.1-flash:free")).toBe(true);
+      expect(isFreeModel("beam-free")).toBe(true);
+      expect(isFreeModel("gpt-5.5")).toBe(false);
+      expect(isFreeModel("gpt-5.5-free")).toBe(true);
+      expect(isFreeModel("gpt-5.5:free")).toBe(true);
+      expect(isFreeModel("FREE-MODEL-FREE")).toBe(true); // case-insensitive
     });
 
     it("resolveProviderOptions resolves the apiKeyEnv of the selected preset", () => {

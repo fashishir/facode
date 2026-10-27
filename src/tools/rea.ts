@@ -3,12 +3,11 @@ import { z } from "zod";
 import { execFileSync } from "node:child_process";
 import { extname, resolve, basename } from "node:path";
 import { existsSync, statSync } from "node:fs";
-import { truncate } from "@/utils";
 import { resolveReaCli, getActiveMcpManager } from "@/mcp";
 
 /** Direct CLI wrappers for core REA capabilities as a fallback when rea-mcp is not running. */
 
-function runRea(args: string[], cwd: string, maxBuffer = 15 * 1024 * 1024): string {
+function runRea(args: string[], cwd: string, maxBuffer = 100 * 1024 * 1024): string {
   const { command, args: cliArgs, shell } = resolveReaCli(args);
   return execFileSync(command, cliArgs, {
     cwd,
@@ -42,11 +41,11 @@ export const reaAnalyzeTool = makeTool({
     const targetPath = resolve(ctx.cwd, input.target);
     try {
       const out = runRea(["analyze", targetPath], ctx.cwd);
-      return { output: truncate(out, 15000) };
+      return { output: out };
     } catch (e: any) {
       const partial = [e?.stdout, e?.stderr].filter(Boolean).join("\n");
       return {
-        output: truncate(partial || `REA analyze failed: ${e?.message ?? e}`, 15000),
+        output: partial || `REA analyze failed: ${e?.message ?? e}`,
         error: true,
       };
     }
@@ -68,11 +67,11 @@ export const reaDecompileTool = makeTool({
     if (input.item) args.push(input.item);
     try {
       const out = runRea(args, ctx.cwd);
-      return { output: truncate(out, 15000) };
+      return { output: out };
     } catch (e: any) {
       const partial = [e?.stdout, e?.stderr].filter(Boolean).join("\n");
       return {
-        output: truncate(partial || `REA decompile failed: ${e?.message ?? e}`, 15000),
+        output: partial || `REA decompile failed: ${e?.message ?? e}`,
         error: true,
       };
     }
@@ -87,7 +86,7 @@ export const reaDoctorTool = makeTool({
   async execute(ctx: ToolContext): Promise<ToolResult> {
     try {
       const { out } = runReaTolerant(["doctor"], ctx.cwd);
-      return { output: truncate(out, 15000) };
+      return { output: out };
     } catch (e: any) {
       return { output: `REA doctor failed: ${e?.stderr || e?.message || e}`, error: true };
     }
@@ -112,18 +111,13 @@ export const reaSearchToolsTool = makeTool({
       return { output: `No REA tools matching "${input.query}" found. Try broader keywords like 'inspect', 'binary', 'code', 'strings', or 'dump'.` };
     }
     const formatted = matches
-      .slice(0, 30)
       .map((t) => {
         const params = Object.keys((t.inputSchema as any)?.properties ?? {}).join(", ");
         return `- ${t.name}: ${t.description || "No description"} (args: ${params || "none"})`;
       })
       .join("\n");
-    const countNote =
-      matches.length > 30
-        ? `\n\n...and ${matches.length - 30} more tools. Be more specific in your query to narrow down.`
-        : "";
     return {
-      output: `Found ${matches.length} REA tool(s) matching "${input.query}":\n\n${formatted}${countNote}`,
+      output: `Found ${matches.length} REA tool(s) matching "${input.query}":\n\n${formatted}`,
     };
   },
 });
@@ -146,7 +140,7 @@ export const reaCallTool = makeTool({
       return { output: "REA MCP manager is not active.", error: true };
     }
     const res = await mcp.callTool(input.tool_name, input.arguments ?? {});
-    return { output: truncate(res.output, 15000), error: res.error };
+    return { output: res.output, error: res.error };
   },
 });
 

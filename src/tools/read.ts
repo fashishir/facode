@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { makeTool, type ToolContext, type ToolResult } from "@/tools/types";
-import { numberLines, truncate } from "@/utils";
+import { numberLines } from "@/utils";
 import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -27,7 +27,7 @@ export const readTool = makeTool({
     const lines = content.split("\n");
     const slice = lines.slice(start - 1, input.limit ? start - 1 + input.limit : undefined);
     const numbered = numberLines(slice.join("\n"), start);
-    return { output: truncate(numbered, 12000) };
+    return { output: numbered };
   },
 });
 

@@ -4,11 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   addProvider,
+  listProviderModels,
   listProviderSetups,
+  pickModel,
   removeProvider,
+  resolvePickAnswer,
   setModel,
   showModel,
   testProvider,
+  updateProvider,
   useProvider,
   interactiveAddProvider,
 } from "@/provider-commands";
@@ -132,6 +136,144 @@ describe("provider-commands", () => {
       expect(out).toContain('already exists');
       const raw = await userCfg();
       expect(raw.providers.dup.baseURL).toBe("https://a.example.com/v1");
+      // The refusal points at both remediation paths.
+      expect(out).toContain("facode provider set dup");
+      expect(out).toContain("--force");
+    });
+
+    it("overwrites an existing provider with --force", async () => {
+      await addProvider({
+        name: "dup",
+        baseURL: "https://a.example.com/v1",
+        apiKey: "sk-abcdefghijklmnop1234",
+        model: "old-model",
+      });
+      const out = addProvider({
+        name: "dup",
+        baseURL: "https://b.example.com/v1",
+        apiKey: "env:FRESH_VAR",
+        model: "new-model",
+        force: true,
+      });
+      expect(out).toContain('overwritten in');
+      const raw = await userCfg();
+      expect(Object.keys(raw.providers)).toEqual(["dup"]);
+      expect(raw.providers.dup).toEqual({
+        baseURL: "https://b.example.com/v1",
+        apiKeyEnv: "FRESH_VAR",
+        apiKey: "",
+        model: "new-model",
+      });
+    });
+  });
+
+  describe("updateProvider", () => {
+    it("updates only the passed fields (partial update keeps key + model)", async () => {
+      await addProvider({
+        name: "up",
+        baseURL: "https://a.example.com/v1",
+        apiKey: "sk-abcdefghijklmnop1234",
+        model: "keep-me",
+      });
+      const out = updateProvider({ name: "up", baseURL: "https://b.example.com/v1" });
+      expect(out).toContain('✔ Provider "up" updated in');
+      // New URL shown; the stored plaintext key is untouched and never printed.
+      expect(out).toContain("https://b.example.com/v1");
+      expect(out).toContain("sk-abcde...1234");
+      expect(out).not.toContain("sk-abcdefghijklmnop1234");
+      const raw = await userCfg();
+      expect(raw.providers.up).toEqual({
+        baseURL: "https://b.example.com/v1",
+        apiKey: "sk-abcdefghijklmnop1234",
+        model: "keep-me",
+      });
+    });
+
+    it("changes key + model when passed (old plaintext key fully cleared)", async () => {
+      await addProvider({
+        name: "full",
+        baseURL: "https://a.example.com/v1",
+        apiKey: "sk-oldoldoldoldold456",
+      });
+      const out = updateProvider({
+        name: "full",
+        baseURL: "https://b.example.com/v1",
+        apiKey: "sk-newnewnewnewnew456",
+        model: "new-model",
+      });
+      expect(out).toContain("updated in");
+      const raw = await userCfg();
+      expect(JSON.stringify(raw)).not.toContain("sk-oldoldoldoldold456");
+      expect(raw.providers.full.apiKey).toBe("sk-newnewnewnewnew456");
+      expect(raw.providers.full.baseURL).toBe("https://b.example.com/v1");
+      expect(raw.providers.full.model).toBe("new-model");
+    });
+
+    it("env: key update stores a reference and clears the plaintext", async () => {
+      await addProvider({
+        name: "envup",
+        baseURL: "https://a.example.com/v1",
+        apiKey: "sk-abcdefghijklmnop1234",
+      });
+      const out = updateProvider({ name: "envup", apiKey: "env:ROTATED_VAR" });
+      expect(out).toContain("env:ROTATED_VAR");
+      const raw = await userCfg();
+      expect(raw.providers.envup.apiKeyEnv).toBe("ROTATED_VAR");
+      expect(raw.providers.envup.apiKey).toBe("");
+      expect(JSON.stringify(raw)).not.toContain("sk-abcdefghijklmnop1234");
+    });
+
+    it("keeps the model and URL when only the key changes", async () => {
+      await addProvider({
+        name: "keyonly",
+        baseURL: "https://a.example.com/v1",
+        apiKey: "sk-abcdefghijklmnop1234",
+        model: "stable-model",
+      });
+      await updateProvider({ name: "keyonly", apiKey: "sk-newkeynewkey1234" });
+      const raw = await userCfg();
+      expect(raw.providers.keyonly.model).toBe("stable-model");
+      expect(raw.providers.keyonly.baseURL).toBe("https://a.example.com/v1");
+    });
+
+    it("refuses built-in presets with a hint", async () => {
+      const out = updateProvider({ name: "openai", baseURL: "https://evil.example.com/v1" });
+      expect(out).toContain("built-in and cannot be modified");
+      expect(out).toContain("provider add");
+      // Nothing was written.
+      await expect(readFile(join(userDir, "config.json"), "utf8")).rejects.toThrow();
+    });
+
+    it("errors on unknown names, listing what IS registered", async () => {
+      await addProvider({
+        name: "real",
+        baseURL: "https://a.example.com/v1",
+        apiKey: "sk-abcdefghijklmnop1234",
+      });
+      const out = updateProvider({ name: "ghost", baseURL: "https://x.example.com/v1" });
+      expect(out).toContain('Unknown provider "ghost"');
+      expect(out).toContain("real");
+      expect(out).toContain("facode provider add ghost");
+    });
+
+    it("respects --scope project (updates the project layer only)", async () => {
+      await addProvider({
+        name: "scoped",
+        baseURL: "https://a.example.com/v1",
+        apiKey: "sk-abcdefghijklmnop1234",
+        scope: "project",
+        cwd: project,
+      });
+      await updateProvider({
+        name: "scoped",
+        apiKey: "env:PROJ_VAR",
+        scope: "project",
+        cwd: project,
+      });
+      const raw = await projectCfg();
+      expect(raw.providers.scoped.apiKeyEnv).toBe("PROJ_VAR");
+      // The user layer must stay untouched.
+      await expect(readFile(join(userDir, "config.json"), "utf8")).rejects.toThrow();
     });
   });
 
@@ -312,6 +454,116 @@ describe("provider-commands", () => {
       const praw = await projectCfg();
       expect(praw.model).toBe("proj-model");
       expect(showModel(project)).toContain("proj-model");
+    });
+  });
+
+  describe("resolvePickAnswer", () => {
+    const ordered = ["free-a:free", "free-b:free", "paid-a", "paid-b"];
+
+    it("resolves 1-based numbers into list entries", () => {
+      expect(resolvePickAnswer("1", ordered)).toBe("free-a:free");
+      expect(resolvePickAnswer("4", ordered)).toBe("paid-b");
+    });
+
+    it("rejects out-of-range numbers and non-numeric junk", () => {
+      expect(resolvePickAnswer("0", ordered)).toBeUndefined();
+      expect(resolvePickAnswer("5", ordered)).toBeUndefined();
+      expect(resolvePickAnswer("-1", ordered)).toBeUndefined();
+      expect(resolvePickAnswer("abc", ordered)).toBeUndefined();
+      expect(resolvePickAnswer("", ordered)).toBeUndefined();
+      expect(resolvePickAnswer("   ", ordered)).toBeUndefined();
+    });
+
+    it("accepts exact ids from the list (with surrounding spaces)", () => {
+      expect(resolvePickAnswer("paid-a", ordered)).toBe("paid-a");
+      expect(resolvePickAnswer("  free-b:free  ", ordered)).toBe("free-b:free");
+      // An id NOT in the list must not pass the picker (typo protection).
+      expect(resolvePickAnswer("not-listed", ordered)).toBeUndefined();
+    });
+  });
+
+  describe("listProviderModels", () => {
+    it("groups free models first with counts", async () => {
+      addProvider({
+        name: "modelly",
+        baseURL: "https://models.example.com/v1",
+        apiKey: "sk-abcdefghijklmnop1234",
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: [{ id: "paid-alpha" }, { id: "beta:free" }, { id: "alpha:free" }, { id: "paid-beta" }],
+          }),
+        })
+      );
+      const out = await listProviderModels(project, "modelly");
+      expect(out).toContain("4 total, 2 free");
+      // Free block comes before the other models, ids preserved.
+      expect(out.indexOf("beta:free")).toBeLessThan(out.indexOf("Other models:"));
+      expect(out.indexOf("Other models:")).toBeLessThan(out.indexOf("paid-alpha"));
+      expect(out).toContain("facode model set --pick modelly");
+      // The fetch went to the /models URL with the bearer key.
+      const call = (fetch as any).mock.calls[0];
+      expect(call[0]).toBe("https://models.example.com/v1/models");
+      expect(call[1].headers.Authorization).toBe("Bearer sk-abcdefghijklmnop1234");
+    });
+
+    it("reports unknown providers, HTTP errors, and empty lists", async () => {
+      expect(await listProviderModels(project, "nope")).toContain("Unknown provider");
+
+      addProvider({ name: "err", baseURL: "https://e.example.com/v1", apiKey: "sk-abcdefghijklmnop1234" });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({ ok: false, status: 401, text: async () => "no key" })
+      );
+      expect(await listProviderModels(project, "err")).toContain("HTTP 401");
+
+      addProvider({ name: "empty", baseURL: "https://m.example.com/v1", apiKey: "sk-abcdefghijklmnop1234" });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ data: [] }) })
+      );
+      expect(await listProviderModels(project, "empty")).toContain("returned no models");
+    });
+
+    it("sends no auth header when the provider's key resolves to empty", async () => {
+      // An env-referenced key whose variable is unset resolves to "" — the
+      // /models call must then omit the Authorization header entirely.
+      addProvider({
+        name: "keyless",
+        baseURL: "https://k.example.com/v1",
+        apiKey: "env:FACODE_TEST_KEYLESS",
+      });
+      delete process.env.FACODE_TEST_KEYLESS;
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: [{ id: "m" }] }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      await listProviderModels(project, "keyless");
+      expect(fetchMock.mock.calls[0][1].headers).toBeUndefined();
+    });
+  });
+
+  describe("pickModel", () => {
+    // vitest runs without a TTY, so the picker should refuse to prompt (the
+    // actual interactive flow is exercised manually in a real terminal).
+    it.runIf(!process.stdin.isTTY)("declines to prompt without a TTY (no fetch)", async () => {
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const out = await pickModel(project, undefined);
+      expect(out).toContain("needs a terminal (TTY)");
+      expect(out).toContain("facode provider models");
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it.runIf(!process.stdin.isTTY)("names an unknown provider before prompting", async () => {
+      const out = await pickModel(project, "ghost");
+      expect(out).toContain('Unknown provider "ghost"');
     });
   });
 

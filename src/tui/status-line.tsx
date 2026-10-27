@@ -11,9 +11,21 @@ export interface StatusLineProps {
   turnCount?: number;
   /** Live REA/MCP status, e.g. "● 207 tools" or "○ connecting". */
   reaStatus?: string;
+  /** Active model — shown live, refreshed after every slash command. */
+  model?: string;
+  /** Active provider name. */
+  provider?: string;
 }
 
-export function StatusLine({ text, thinking, permissionMode = "default", turnCount, reaStatus }: StatusLineProps) {
+export function StatusLine({
+  text,
+  thinking,
+  permissionMode = "default",
+  turnCount,
+  reaStatus,
+  model,
+  provider,
+}: StatusLineProps) {
   const [frame, setFrame] = useState(0);
 
   useEffect(() => {
@@ -50,6 +62,20 @@ export function StatusLine({ text, thinking, permissionMode = "default", turnCou
       </Box>
 
       <Box flexDirection="row">
+        {model && (
+          <>
+            <Text color="gray">model: </Text>
+            <Text color="white">{model}</Text>
+            <Text color="gray.dim"> │ </Text>
+          </>
+        )}
+        {provider && (
+          <>
+            <Text color="gray">provider: </Text>
+            <Text color="white">{provider}</Text>
+            <Text color="gray.dim"> │ </Text>
+          </>
+        )}
         {reaStatus && (
           <>
             <Text color="gray">REA: </Text>

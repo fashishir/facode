@@ -2,7 +2,7 @@ import type { Message, ToolCall, ToolResult } from "@/agent/types";
 import type { Tool, ToolContext } from "@/tools/types";
 import { ToolRegistry } from "@/tools/registry";
 import { createCompletion, getProviderOptions } from "@/agent/provider";
-import { truncate } from "@/utils";
+import { loadConfig } from "@/config";
 import { toInputSchema } from "@/tools/types";
 
 export interface LoopOptions {
@@ -26,6 +26,11 @@ export interface LoopOptions {
   onReasoningDelta?: (delta: string) => void;
   /** Called when the assistant produces or updates a tool call. */
   onToolCall?: (call: ToolCall) => void;
+  /**
+   * Called when auto-failover switches the active model mid-turn (the previous
+   * model hit a quota/rate-limit error). Lets the host surface it in the UI.
+   */
+  onModelSwitch?: (from: string, to: string) => void;
   /** Called when the turn ends (content + tools done). */
   onTurnEnd?: (messages: Message[]) => void;
   /** Abort signal for the whole loop. */
@@ -38,7 +43,7 @@ export interface LoopOptions {
  * 2. Call provider with available tools
  * 3. Execute any tool calls (with permission gating)
  * 4. Feed tool results back as `role: "tool"` messages
- * 5. Repeat until no tool calls remain or max turns
+ * 5. Repeat until no tool calls remain (unlimited turns)
  */
 export async function runAgentLoop(
   userInput: string,
@@ -56,6 +61,7 @@ export async function runAgentLoop(
     onReasoningDelta,
     onToolCall,
     onTurnEnd,
+    onModelSwitch,
     signal,
   } = opts;
 
@@ -87,10 +93,19 @@ export async function runAgentLoop(
 
   const providerOpts = getProviderOptions(cwd);
 
-  let turn = 0;
-  const MAX_TURNS = 15;
+  // Auto-failover: when the active model hits a quota/rate-limit error, FA Code
+  // silently switches to another model on the same endpoint and retries, so a
+  // free-tier cap never kills a session. The switch is in-memory for the turn
+  // only — the configured model is untouched, so a fresh session starts clean.
+  const cfg = loadConfig(cwd);
+  providerOpts.failover = {
+    candidates: [],
+    cfg,
+    onSwitch: onModelSwitch,
+  };
 
-  while (turn < MAX_TURNS) {
+  // Unlimited turns — the loop runs until the model stops calling tools
+  for (;;) {
     if (signal?.aborted) {
       const abortMsg: Message = {
         role: "assistant",
@@ -189,22 +204,12 @@ export async function runAgentLoop(
       toolResults.push({
         role: "tool",
         tool_call_id: call.id,
-        content: truncate(result.output, 12000),
+        content: result.output,
         name: call.function.name,
       });
       onToolResult?.(call.function.name, result, call.id);
     }
 
     messages.push(...toolResults);
-    turn++;
   }
-
-  // Max turns reached
-  const finalMsg: Message = {
-    role: "assistant",
-    content: "[Max turns reached. Please provide feedback or ask to continue.]",
-  };
-  messages.push(finalMsg);
-  onTurnEnd?.(messages);
-  return { messages, lastResponse: finalMsg.content as string };
 }

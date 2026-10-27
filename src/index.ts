@@ -6,7 +6,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { resolve } from "node:path";
 import { Chalk } from "chalk";
 const chalk = new Chalk({ level: 2 });
-import { loadConfig, saveConfig, defaultSystemPrompt } from "@/config";
+import { loadConfig, defaultSystemPrompt } from "@/config";
 import { ensureDir, facodeDir } from "@/utils";
 import { createSession, loadSession, appendSession, compactSession } from "@/session/store";
 import { runAgentLoop } from "@/agent/loop";
@@ -20,11 +20,16 @@ import { executeSlash } from "@/cli";
 import {
   addProvider,
   interactiveAddProvider,
+  listProviderModels,
   listProviderSetups,
+  pickModel,
   removeProvider,
   setModel,
+  setFailover,
+  showFailover,
   showModel,
   testProvider,
+  updateProvider,
   useProvider,
   type Scope,
 } from "@/provider-commands";
@@ -234,14 +239,15 @@ async function main() {
     .option("--api-key-env <name>", "Name of an environment variable holding the API key")
     .option("--model <model>", "Default model for this provider")
     .option("--scope <scope>", "Where to save: user (~/.facode) or project (.facode)")
-    .action(async (name: string | undefined, opts: { baseUrl?: string; apiKey?: string; apiKeyEnv?: string; model?: string; scope?: string }) => {
+    .option("--force", "Overwrite the provider if it already exists in the target scope")
+    .action(async (name: string | undefined, opts: { baseUrl?: string; apiKey?: string; apiKeyEnv?: string; model?: string; scope?: string; force?: boolean }) => {
       const scope = scopeOf(opts);
       const cwd = projectCwd();
       // Treat --api-key-env as an env:-style key so both the direct and the
       // interactive path store an apiKeyEnv reference, not a copy.
       const apiKey = opts.apiKeyEnv ? `env:${opts.apiKeyEnv}` : opts.apiKey;
       if (name && opts.baseUrl && apiKey) {
-        console.log(addProvider({ name, baseURL: opts.baseUrl, apiKey, model: opts.model, scope, cwd }));
+        console.log(addProvider({ name, baseURL: opts.baseUrl, apiKey, model: opts.model, scope, cwd, force: opts.force }));
         return;
       }
       if (!input.isTTY) {
@@ -292,18 +298,102 @@ async function main() {
     .description("Ping the provider's /models endpoint to verify URL + key")
     .action(async (name: string) => console.log(await testProvider(projectCwd(), name)));
 
+  providerCmd
+    .command("models <name>")
+    .description("List all models the provider's endpoint offers (free models first)")
+    .action(async (name: string) => console.log(await listProviderModels(projectCwd(), name)));
+
+  // Auto-failover: when the active model hits a quota/rate-limit error, FA Code
+  // silently switches to another model on the same endpoint and retries, so a
+  // free-tier cap never kills a session. The switch is in-memory for the turn
+  // only — the configured model is untouched, so a fresh session starts clean.
+  const failoverCmd = program
+    .command("failover")
+    .description("Show or set the auto-failover policy (quota/rate-limit fallback)");
+  failoverCmd
+    .command("show")
+    .description("Show the effective failover policy")
+    .action(() => console.log(showFailover(projectCwd())));
+  failoverCmd
+    .command("on")
+    .description("Turn auto-failover on")
+    .option("--free-only", "Only fall back to :free models (never spends paid quota)")
+    .option("--max-attempts <n>", "Max models to try per turn", "3")
+    .option("--scope <scope>", "Where to save: user or project", "user")
+    .action((opts: { freeOnly?: boolean; maxAttempts?: string; scope?: string }) =>
+      console.log(
+        setFailover(
+          { enabled: true, freeOnly: opts.freeOnly, maxAttempts: parseInt(opts.maxAttempts ?? "3", 10) || 3 },
+          scopeOf(opts),
+          projectCwd()
+        )
+      )
+    );
+  failoverCmd
+    .command("off")
+    .description("Turn auto-failover off (quota errors propagate to the user)")
+    .option("--scope <scope>", "Where to save: user or project", "user")
+    .action((opts: { scope?: string }) =>
+      console.log(setFailover({ enabled: false }, scopeOf(opts), projectCwd()))
+    );
+
+  providerCmd
+    .command("set <name>")
+    .description("Update an existing provider — only the options you pass change")
+    .option("--base-url <url>", "New base URL")
+    .option("--api-key <key>", "New API key (plaintext; prefer --api-key-env)")
+    .option("--api-key-env <name>", "New env-var reference for the API key")
+    .option("--model <model>", "New default model")
+    .option("--scope <scope>", "Which layer to update: user or project")
+    .action((name: string, opts: { baseUrl?: string; apiKey?: string; apiKeyEnv?: string; model?: string; scope?: string }) => {
+      if (!opts.baseUrl && !opts.apiKey && !opts.apiKeyEnv && !opts.model) {
+        console.log(
+          [
+            "Usage: facode provider set <name> [--base-url <url>] [--api-key <key>]",
+            "       [--api-key-env <VAR>] [--model <m>] [--scope user|project]",
+            "Everything you omit keeps its current value. Built-ins cannot be modified.",
+          ].join("\n")
+        );
+        process.exitCode = 1;
+        return;
+      }
+      console.log(
+        updateProvider({
+          name,
+          baseURL: opts.baseUrl,
+          apiKey: opts.apiKey,
+          apiKeyEnv: opts.apiKeyEnv,
+          model: opts.model,
+          scope: scopeOf(opts),
+          cwd: projectCwd(),
+        })
+      );
+    });
+
   const modelCmd = program
     .command("model")
     .description("Show or set the active model")
     .action(() => console.log(showModel(projectCwd())));
 
   modelCmd
-    .command("set <model>")
-    .description("Set + persist the model (saved to user config by default)")
+    .command("set [model]")
+    .description("Set + persist the model, or --pick it interactively from the endpoint")
+    .option("--pick [provider]", "Fetch the model list and choose interactively (terminal only); optional provider name, defaults to the active provider")
     .option("--scope <scope>", "Where to save: user or project")
-    .action((model: string, opts: { scope?: string }) =>
-      console.log(setModel(projectCwd(), model, scopeOf(opts)))
-    );
+    .action(async (model: string | undefined, opts: { pick?: string | boolean; scope?: string }) => {
+      const scope = scopeOf(opts);
+      const cwd = projectCwd();
+      if (opts.pick) {
+        console.log(await pickModel(cwd, opts.pick === true ? undefined : opts.pick, scope));
+        return;
+      }
+      if (!model) {
+        console.log("Usage: facode model set <model> [--scope user|project]\n       facode model set --pick [provider]  (interactive chooser)");
+        process.exitCode = 1;
+        return;
+      }
+      console.log(setModel(cwd, model, scope));
+    });
 
   modelCmd
     .command("show")
@@ -363,10 +453,11 @@ async function runBareLoop(opts: RunOpts): Promise<void> {
     setMessages: (m: Message[]) => opts.setHistory(m),
     setStatus: () => {},
     setPermissionMode: () => {},
-    setProvider: (name: string) => {
-      const cfg = loadConfig(opts.cwd);
-      cfg.activeProvider = name as any;
-      saveConfig(opts.cwd, cfg);
+    setProvider: (_name: string) => {
+      // Display-only. Persistence already happened in useProvider
+      // (provider-commands) with the correct per-layer write. This callback
+      // used to save the MERGED config into the project layer — leaking user
+      // values (and API keys) into .facode/config.json.
     },
     permissionMode: "default" as const,
     compact: async () => {
