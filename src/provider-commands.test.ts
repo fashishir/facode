@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   addProvider,
+  getModelChoices,
   listProviderModels,
   listProviderSetups,
   pickModel,
+  providerChoices,
   removeProvider,
   resolvePickAnswer,
   setModel,
@@ -564,6 +566,106 @@ describe("provider-commands", () => {
     it.runIf(!process.stdin.isTTY)("names an unknown provider before prompting", async () => {
       const out = await pickModel(project, "ghost");
       expect(out).toContain('Unknown provider "ghost"');
+    });
+  });
+
+  describe("getModelChoices", () => {
+    it("returns the named provider's models free-first when there is no TTY to prompt for", async () => {
+      addProvider({
+        name: "chooser",
+        baseURL: "https://c.example.com/v1",
+        apiKey: "sk-abcdefghijklmnop1234",
+      });
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: [{ id: "paid-a" }, { id: "x:free" }, { id: "y-free" }] }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const choices = await getModelChoices(project, "chooser");
+      expect(choices.ok).toBe(true);
+      expect(choices.label).toBe("chooser");
+      // Both free conventions (`:free` and `-free`) sort ahead of paid models.
+      expect(choices.models).toEqual(["x:free", "y-free", "paid-a"]);
+      expect(choices.freeCount).toBe(2);
+      expect(fetchMock.mock.calls[0][0]).toBe("https://c.example.com/v1/models");
+      expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe(
+        "Bearer sk-abcdefghijklmnop1234"
+      );
+    });
+
+    it("falls back to the active/resolved endpoint when no provider is named", async () => {
+      addProvider({
+        name: "activep",
+        baseURL: "https://a.example.com/v1",
+        apiKey: "sk-abcdefghijklmnop1234",
+      });
+      useProvider(project, "activep", "user");
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: [{ id: "only-model" }] }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const choices = await getModelChoices(project);
+      expect(choices.ok).toBe(true);
+      expect(choices.label).toBe("activep");
+      expect(fetchMock.mock.calls[0][0]).toBe("https://a.example.com/v1/models");
+    });
+
+    it("reports unknown providers, HTTP failures, and empty listings as messages", async () => {
+      const unknown = await getModelChoices(project, "ghost");
+      expect(unknown.ok).toBe(false);
+      expect(unknown.message).toContain('Unknown provider "ghost"');
+
+      addProvider({ name: "errp", baseURL: "https://e.example.com/v1", apiKey: "sk-abcdefghijklmnop1234" });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({ ok: false, status: 401, text: async () => "no key" })
+      );
+      const failed = await getModelChoices(project, "errp");
+      expect(failed.ok).toBe(false);
+      expect(failed.message).toContain("HTTP 401");
+      expect(failed.models).toEqual([]);
+
+      addProvider({ name: "emptyp", baseURL: "https://m.example.com/v1", apiKey: "sk-abcdefghijklmnop1234" });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ data: [] }) })
+      );
+      const empty = await getModelChoices(project, "emptyp");
+      expect(empty.ok).toBe(false);
+      expect(empty.message).toContain("returned no models");
+    });
+  });
+
+  describe("providerChoices", () => {
+    it("lists built-ins plus custom providers and marks the active one", () => {
+      addProvider({
+        name: "mine",
+        baseURL: "https://m.example.com/v1",
+        apiKey: "sk-abcdefghijklmnop1234",
+        model: "mine-model",
+      });
+      useProvider(project, "mine", "user");
+
+      const choices = providerChoices(project);
+      const custom = choices.find((c) => c.name === "mine");
+      expect(custom).toEqual({
+        name: "mine",
+        baseURL: "https://m.example.com/v1",
+        model: "mine-model",
+        builtin: false,
+        active: true,
+      });
+      // Built-ins are switchable but flagged, and the default "openai" value is
+      // NOT treated as a selected provider.
+      const openai = choices.find((c) => c.name === "openai");
+      expect(openai?.builtin).toBe(true);
+      expect(openai?.active).toBe(false);
+      expect(choices.find((c) => c.name === "deepseek")?.builtin).toBe(true);
     });
   });
 

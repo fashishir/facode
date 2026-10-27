@@ -29,6 +29,21 @@ export interface SlashCommand {
   execute: (args: string, ctx: CommandContext) => Promise<string>;
 }
 
+/**
+ * Interactive TUI hooks. Slash commands are shared by bare mode (where a string
+ * is the only output) and the Ink TUI (where a command may need to open one of
+ * its own overlays). When a hook is missing the command falls back to its text
+ * output, so bare mode / non-TTY behavior is unchanged.
+ */
+export interface TuiHooks {
+  /** Arrow-key chooser listing a registered provider's (or the active endpoint's) models. */
+  openModelPicker: (provider?: string) => void;
+  /** Arrow-key chooser listing registered providers, to switch the active one. */
+  openProviderPicker: () => void;
+  /** Guided `provider add` form, optionally prefilled with a name. */
+  openProviderForm: (name?: string) => void;
+}
+
 export interface CommandContext {
   cwd: string;
   messages: Message[];
@@ -39,6 +54,8 @@ export interface CommandContext {
   setProvider: (name: string) => void;
   compact: () => Promise<void>;
   exit: () => void;
+  /** Present only in the TUI — enables the interactive choosers. */
+  tui?: TuiHooks;
 }
 
 const BUILTINS: SlashCommand[] = [
@@ -127,12 +144,21 @@ const BUILTINS: SlashCommand[] = [
           showModel(ctx.cwd),
           "",
           "Usage: /model <model-name>   (persists to ~/.facode/config.json)",
-          "       /model pick           (list the endpoint's models, free first)",
+          "       /model pick           (choose from the endpoint's models, free first)",
         ].join("\n");
       }
       if (name === "pick") {
-        // Inside the TUI stdin belongs to Ink, so no interactive prompting —
-        // render the list instead; the CLI subcommand offers the live picker.
+        // In the TUI the chooser is an Ink overlay (Ink owns stdin, so the
+        // command must not prompt itself). Bare mode / non-TTY renders the
+        // plain list and leaves picking to `facode model set --pick`.
+        if (ctx.tui) {
+          const cfg = loadConfig(ctx.cwd);
+          ctx.tui.openModelPicker(
+            cfg.activeProvider ??
+              (cfg.provider && cfg.provider !== "openai" ? cfg.provider : undefined)
+          );
+          return "";
+        }
         const cfg = loadConfig(ctx.cwd);
         const resolved = resolveProviderOptions(cfg);
         const target =
@@ -182,7 +208,9 @@ const BUILTINS: SlashCommand[] = [
           listProviderSetups(ctx.cwd),
           "",
           "Usage: /provider add <name> <baseURL> <apiKey> [model]",
+          "       /provider add                 (guided form, TUI only)",
           "       /provider use|remove|test|models <name>",
+          "       /provider use                 (pick from a list, TUI only)",
           "       /provider set <name> <baseURL> [apiKey] [model]",
         ].join("\n");
       }
@@ -192,6 +220,12 @@ const BUILTINS: SlashCommand[] = [
           // /provider add <name> <baseURL> <apiKey> [model]
           // `env:VARNAME` keys are normalized into apiKeyEnv refs by addProvider.
           const [name, baseURL, apiKey, ...model] = rest;
+          // Missing fields in the TUI open the guided form instead of printing
+          // usage — the readline prompts cannot run there (Ink owns stdin).
+          if (ctx.tui && (!name || !baseURL)) {
+            ctx.tui.openProviderForm(name);
+            return "";
+          }
           if (!name || !baseURL || (!apiKey && !stdin.isTTY)) {
             return "Usage: /provider add <name> <baseURL> <apiKey> [model]\n(omit apiKey in an interactive TTY to be prompted)";
           }
@@ -206,7 +240,13 @@ const BUILTINS: SlashCommand[] = [
         }
         case "use": {
           const name = rest[0];
-          if (!name) return "Usage: /provider use <name>";
+          if (!name) {
+            if (ctx.tui) {
+              ctx.tui.openProviderPicker();
+              return "";
+            }
+            return "Usage: /provider use <name>";
+          }
           const out = useProvider(ctx.cwd, name, "user");
           ctx.setProvider(name);
           return out;

@@ -425,6 +425,129 @@ export async function listProviderModels(cwd: string, name: string): Promise<str
 }
 
 /**
+ * The endpoint a model listing/selection targets, plus its display label.
+ * Shared by `pickModel` (CLI, readline) and `getModelChoices` (TUI, Ink
+ * overlay) so both resolve the same endpoint when no provider is named.
+ */
+export interface ModelTarget {
+  label: string;
+  baseURL: string;
+  apiKey?: string;
+  /** Set when no endpoint can be resolved (unknown provider / nothing configured). */
+  error?: string;
+}
+
+/**
+ * Resolve which endpoint to list models from:
+ *   - `name` given → that registered preset/built-in,
+ *   - otherwise → whatever `resolveProviderOptions` would actually use (named
+ *     active provider, legacy top-level custom endpoint, or the zero-config
+ *     openai preset honoring OPENAI_BASE_URL).
+ */
+export function resolveModelTarget(cfg: FacodeConfig, name?: string): ModelTarget {
+  if (name) {
+    const preset = getProviderPresets(cfg)[name];
+    if (!preset) {
+      return {
+        label: name,
+        baseURL: "",
+        error: `Unknown provider "${name}". Available: ${Object.keys(getProviderPresets(cfg)).join(", ")}`,
+      };
+    }
+    return { label: name, baseURL: preset.baseURL, apiKey: presetApiKey(preset) };
+  }
+
+  const resolved = resolveProviderOptions(cfg);
+  const baseURL = resolved.baseURL ?? process.env.OPENAI_BASE_URL ?? "";
+  const label = resolved.provider ?? "openai";
+  if (!baseURL) {
+    return {
+      label,
+      baseURL: "",
+      error: "No provider is configured — set one up with `facode provider add`.",
+    };
+  }
+  return { label, baseURL, apiKey: resolved.apiKey ?? process.env.OPENAI_API_KEY };
+}
+
+/** Result of resolving + fetching an endpoint's models for a picker. */
+export interface ModelChoices {
+  ok: boolean;
+  /** Provider label the models belong to. */
+  label: string;
+  /** Formatted message to display when `ok` is false. */
+  message?: string;
+  /** Model ids, free-tier ones first. */
+  models: string[];
+  /** How many leading entries of `models` are free-tier. */
+  freeCount: number;
+}
+
+/**
+ * Data (not formatting) for the TUI model chooser: resolve the target endpoint,
+ * GET its `/models`, and return the ids free-first. The Ink picker cannot use
+ * `pickModel` because stdin belongs to Ink there — this is the same discovery
+ * with no prompting.
+ */
+export async function getModelChoices(
+  cwd: string = process.cwd(),
+  name?: string
+): Promise<ModelChoices> {
+  const target = resolveModelTarget(loadConfig(cwd), name);
+  if (target.error) {
+    return { ok: false, label: target.label, message: target.error, models: [], freeCount: 0 };
+  }
+
+  const result = await fetchEndpointModels(target.baseURL, target.apiKey);
+  if (!result.ok) {
+    return {
+      ok: false,
+      label: target.label,
+      message: `✖ ${target.label}: ${result.error}`,
+      models: [],
+      freeCount: 0,
+    };
+  }
+  if (!result.models.length) {
+    return {
+      ok: false,
+      label: target.label,
+      message: `✖ ${target.label}: endpoint returned no models — check the key/URL.`,
+      models: [],
+      freeCount: 0,
+    };
+  }
+
+  const free = result.models.filter(isFreeModel);
+  const rest = result.models.filter((id) => !isFreeModel(id));
+  return { ok: true, label: target.label, models: [...free, ...rest], freeCount: free.length };
+}
+
+/** One row of the TUI provider chooser. */
+export interface ProviderChoice {
+  name: string;
+  baseURL: string;
+  model: string;
+  /** Built-in preset — switchable, but never editable/removable. */
+  builtin: boolean;
+  /** Currently resolving as the active provider. */
+  active: boolean;
+}
+
+/** Registered providers (built-ins + custom) for the TUI `/provider use` picker. */
+export function providerChoices(cwd: string = process.cwd()): ProviderChoice[] {
+  const cfg = loadConfig(cwd);
+  const active = activeProviderName(cfg);
+  return Object.entries(getProviderPresets(cfg)).map(([name, preset]) => ({
+    name,
+    baseURL: preset.baseURL,
+    model: preset.model,
+    builtin: !!PROVIDER_PRESETS[name],
+    active: name === active,
+  }));
+}
+
+/**
  * Pure helper for the interactive picker: turn an answer (1-based number or
  * exact model id from the shown list) into a model id, or undefined when the
  * answer doesn't resolve (cancel/empty/out-of-range/unknown).
@@ -450,31 +573,11 @@ export async function pickModel(
   name: string | undefined,
   scope: Scope = "user"
 ): Promise<string> {
-  const cfg = loadConfig(cwd);
-  const resolved = resolveProviderOptions(cfg);
-
-  let baseURL: string;
-  let apiKey: string | undefined;
-  let label: string;
-  if (name) {
-    const preset = getProviderPresets(cfg)[name];
-    if (!preset) {
-      return `Unknown provider "${name}". Available: ${Object.keys(getProviderPresets(cfg)).join(", ")}`;
-    }
-    baseURL = preset.baseURL;
-    apiKey = presetApiKey(preset);
-    label = name;
-  } else {
-    // No explicit provider → use whatever the resolver would actually use
-    // (built-in openai preset honoring OPENAI_BASE_URL, a named active
-    // provider, or a legacy top-level custom endpoint).
-    baseURL = resolved.baseURL ?? process.env.OPENAI_BASE_URL ?? "";
-    apiKey = resolved.apiKey ?? process.env.OPENAI_API_KEY;
-    label = resolved.provider ?? "openai";
-    if (!baseURL) {
-      return "No provider is configured — set one up with `facode provider add`.";
-    }
-  }
+  // Unknown provider / nothing configured surfaces BEFORE the TTY check, so a
+  // scripting caller gets the real reason rather than a picker complaint.
+  const target = resolveModelTarget(loadConfig(cwd), name);
+  if (target.error) return target.error;
+  const { baseURL, apiKey, label } = target;
   if (!stdin.isTTY) {
     return [
       "The interactive picker needs a terminal (TTY).",

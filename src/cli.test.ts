@@ -248,4 +248,119 @@ describe("Slash provider/model management", () => {
     const res = await executeSlash("/model real-model", ctx);
     expect(res).toContain('✔ Model set to "real-model"');
   });
+
+});
+
+describe("Slash interactive (TUI) hooks", () => {
+  // Fresh user + project layers per test: the interactive branches read the
+  // active provider, so shared layers would leak state between tests.
+  let userDir = "";
+  let project = "";
+  const oldUserDir = process.env.FACODE_USER_DIR;
+
+  beforeEach(async () => {
+    userDir = await mkdtemp(join(tmpdir(), "facode-tui-user-"));
+    process.env.FACODE_USER_DIR = userDir;
+    project = await mkdtemp(join(tmpdir(), "facode-tui-proj-"));
+  });
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    if (oldUserDir === undefined) delete process.env.FACODE_USER_DIR;
+    else process.env.FACODE_USER_DIR = oldUserDir;
+    if (userDir) await rm(userDir, { recursive: true, force: true });
+    if (project) await rm(project, { recursive: true, force: true });
+  });
+
+  const makeTuiCtx = (withTui = true) => {
+    const hooks = {
+      openModelPicker: vi.fn(),
+      openProviderPicker: vi.fn(),
+      openProviderForm: vi.fn(),
+    };
+    const ctx = {
+      cwd: project,
+      messages: [],
+      setMessages: vi.fn(),
+      setStatus: vi.fn(),
+      setPermissionMode: vi.fn(),
+      setProvider: vi.fn(),
+      permissionMode: "default" as const,
+      compact: vi.fn().mockResolvedValue(undefined),
+      exit: vi.fn(),
+      ...(withTui ? { tui: hooks } : {}),
+    } as unknown as CommandContext;
+    return { ctx, hooks };
+  };
+
+  it("/model pick opens the TUI chooser instead of listing (no fetch, no prompt)", async () => {
+    const { ctx, hooks } = makeTuiCtx();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Nothing selected → undefined lets the picker resolve the same endpoint
+    // `/model pick` would have listed.
+    expect(await executeSlash("/model pick", ctx)).toBe("");
+    expect(hooks.openModelPicker).toHaveBeenCalledWith(undefined);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // With a provider active, the chooser is opened for that provider.
+    await executeSlash(
+      "/provider add tui-model-prov https://tm.example.com/v1 sk-abcdefghijklmnop1234",
+      ctx
+    );
+    await executeSlash("/provider use tui-model-prov", ctx);
+    expect(await executeSlash("/model pick", ctx)).toBe("");
+    expect(hooks.openModelPicker).toHaveBeenLastCalledWith("tui-model-prov");
+  });
+
+  it("/provider use with no name opens the provider picker (named form still switches)", async () => {
+    const { ctx, hooks } = makeTuiCtx();
+    expect(await executeSlash("/provider use", ctx)).toBe("");
+    expect(hooks.openProviderPicker).toHaveBeenCalledTimes(1);
+
+    await executeSlash(
+      "/provider add namedprov https://n.example.com/v1 sk-abcdefghijklmnop1234",
+      ctx
+    );
+    const res = await executeSlash("/provider use namedprov", ctx);
+    expect(res).toContain('✔ Active provider set to "namedprov"');
+    expect(ctx.setProvider).toHaveBeenCalledWith("namedprov");
+    // The named path must not hijack the interactive one.
+    expect(hooks.openProviderPicker).toHaveBeenCalledTimes(1);
+  });
+
+  it("/provider add without fields opens the guided form (name prefilled)", async () => {
+    const { ctx, hooks } = makeTuiCtx();
+    expect(await executeSlash("/provider add", ctx)).toBe("");
+    expect(hooks.openProviderForm).toHaveBeenCalledWith(undefined);
+
+    expect(await executeSlash("/provider add myproxy", ctx)).toBe("");
+    expect(hooks.openProviderForm).toHaveBeenLastCalledWith("myproxy");
+
+    // Fully specified input still registers directly — no form.
+    const direct = await executeSlash(
+      "/provider add fullprov https://f.example.com/v1 sk-abcdefghijklmnop1234",
+      ctx
+    );
+    expect(direct).toContain('✔ Provider "fullprov" added');
+    expect(hooks.openProviderForm).toHaveBeenCalledTimes(2);
+  });
+
+  it("bare mode (no tui hooks) keeps the text output for all three commands", async () => {
+    const { ctx } = makeTuiCtx(false);
+    expect(await executeSlash("/provider use", ctx)).toBe("Usage: /provider use <name>");
+    expect(await executeSlash("/provider add", ctx)).toContain("Usage: /provider add");
+
+    await executeSlash("/provider add bareprov https://b.example.com/v1 sk-abcdefghijklmnop1234", ctx);
+    await executeSlash("/provider use bareprov", ctx);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: [{ id: "m:free" }] }),
+      })
+    );
+    expect(await executeSlash("/model pick", ctx)).toContain('Models for "bareprov"');
+  });
 });

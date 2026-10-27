@@ -8,13 +8,17 @@ import {
 import { InputBox } from "@/tui/input-box";
 import { StatusLine } from "@/tui/status-line";
 import { PermissionPrompt } from "@/tui/permission-prompt";
+import { SelectList } from "@/tui/select-list";
+import { ModelPicker } from "@/tui/model-picker";
+import { ProviderForm, type ProviderFormValues } from "@/tui/provider-form";
 import type { Message, ToolCall } from "@/agent/types";
 import { runAgentLoop } from "@/agent/loop";
 import { summarizeMessages } from "@/agent/compaction";
 import { compactSession, loadSession, appendSession } from "@/session/store";
 import { executeSlash } from "@/cli";
-import { defaultSystemPrompt, loadConfig, resolveProviderOptions } from "@/config";
+import { defaultSystemPrompt, loadConfig, maskKey, resolveProviderOptions } from "@/config";
 import { loadPermissions, savePermissions, decide, type PermissionMode } from "@/permissions";
+import { addProvider, providerChoices } from "@/provider-commands";
 
 export interface TuiAppProps {
   cwd: string;
@@ -41,6 +45,12 @@ interface PendingApproval {
   resolve: (choice: "yes" | "always" | "no" | "plan") => void;
 }
 
+/** An in-TUI overlay opened from the chat box by a slash command's interactive flow. */
+type TuiOverlay =
+  | { kind: "model"; provider?: string }
+  | { kind: "provider-list" }
+  | { kind: "provider-form"; prefillName?: string };
+
 export function TuiApp(props: TuiAppProps) {
   const { exit } = useApp();
   const historyRef = useRef<Message[]>(props.history);
@@ -54,6 +64,9 @@ export function TuiApp(props: TuiAppProps) {
   const [status, setStatus] = useState<string>("Ready");
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("default");
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+  // Interactive chooser/form opened by a slash command; while set, the input box
+  // stops consuming keys so ↑/↓/Enter reach the overlay.
+  const [overlay, setOverlay] = useState<TuiOverlay | null>(null);
 
   const busyRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -150,6 +163,10 @@ export function TuiApp(props: TuiAppProps) {
     ...messages.map((message) => ({ kind: "message" as const, message })),
   ];
 
+  // Rows for the `/provider use` picker (read only while that overlay is open).
+  const providerOptions =
+    overlay?.kind === "provider-list" ? providerChoices(props.cwd) : [];
+
   // Handle initial prompt
   useEffect(() => {
     if (props.initialPrompt && historyRef.current.length === 0) {
@@ -197,6 +214,109 @@ export function TuiApp(props: TuiAppProps) {
     });
   };
 
+  /** Append completed messages to the transcript (and the session log). */
+  const appendMessages = (msgs: Message[]) => {
+    const next = [...getHistory(), ...msgs];
+    setHistory(next);
+    persistNew(next);
+  };
+
+  /**
+   * Slash commands may change the provider (/provider use) or the model
+   * (/model <name>): re-read the config so the status line shows the active
+   * pair live.
+   */
+  const refreshEndpoint = () => {
+    const fresh = loadConfig(props.cwd);
+    setActiveProvider(
+      props.provider ?? fresh.activeProvider ?? fresh.provider ?? "openai"
+    );
+    setActiveModel(resolveProviderOptions(fresh).model || fresh.model || "");
+  };
+
+  /** Close an overlay, optionally logging the outcome (failure/cancel) to the transcript. */
+  const closeOverlay = (message?: string) => {
+    setOverlay(null);
+    if (message) appendMessages([{ role: "assistant", content: message } as Message]);
+  };
+
+  /**
+   * Run a slash command. Shared by the input box and the interactive overlays,
+   * so a picker selection persists through exactly the same path as the typed
+   * command (`/provider use <name>`, `/model <name>`).
+   */
+  const runSlash = async (text: string) => {
+    const out = await executeSlash(text, {
+      cwd: props.cwd,
+      messages: getHistory(),
+      setMessages: setHistory,
+      setStatus,
+      setPermissionMode: (mode) => {
+        setPermissionMode(mode);
+        permStateRef.current.mode = mode;
+        savePermissions(props.cwd, permStateRef.current);
+      },
+      setProvider: (name) => {
+        // Display-only. Persistence already happened in useProvider
+        // (provider-commands) with the correct per-layer write; saving the
+        // MERGED config here used to leak user values — including real API
+        // keys — into the project's .facode/config.json.
+        setActiveProvider(name);
+        setStatus(`Provider: ${name}`);
+      },
+      permissionMode,
+      compact: async () => {
+        await compactSession(props.sessionId, 6, (msgs) =>
+          summarizeMessages(msgs, props.cwd)
+        );
+        setHistory(loadSession(props.sessionId));
+      },
+      exit: () => exit(),
+      // Interactive flows: `/model pick`, `/provider use` (no name) and
+      // `/provider add` (no fields) open Ink overlays instead of printing text.
+      tui: {
+        openModelPicker: (provider) => setOverlay({ kind: "model", provider }),
+        openProviderPicker: () => setOverlay({ kind: "provider-list" }),
+        openProviderForm: (name) => setOverlay({ kind: "provider-form", prefillName: name }),
+      },
+    });
+    if (out) {
+      // Display the slash command and its response in the chat history.
+      appendMessages([
+        { role: "user", content: text } as Message,
+        { role: "assistant", content: out } as Message,
+      ]);
+      setStatus("Ready");
+    }
+    refreshEndpoint();
+  };
+
+  /**
+   * The guided provider form posts structured fields, so it calls `addProvider`
+   * directly — the same function `/provider add` uses — rather than re-parsing a
+   * command line. The echo masks the key.
+   */
+  const submitProviderForm = (values: ProviderFormValues) => {
+    setOverlay(null);
+    const out = addProvider({
+      name: values.name,
+      baseURL: values.baseURL,
+      apiKey: values.apiKey,
+      model: values.model || undefined,
+      scope: "user",
+      cwd: props.cwd,
+    });
+    appendMessages([
+      {
+        role: "user",
+        content: `/provider add ${values.name} ${values.baseURL} ${maskKey(values.apiKey)}${values.model ? ` ${values.model}` : ""}`,
+      } as Message,
+      { role: "assistant", content: out } as Message,
+    ]);
+    setStatus(out.startsWith("✔") ? "Ready" : "Provider not saved");
+    refreshEndpoint();
+  };
+
   const handleSubmit = async (text: string) => {
     if (!text.trim() || busyRef.current || pendingApproval) return;
     setPromptHistory((prev) => [...prev, text]);
@@ -204,52 +324,7 @@ export function TuiApp(props: TuiAppProps) {
     // Slash commands
     if (text.startsWith("/")) {
       try {
-        const out = await executeSlash(text, {
-          cwd: props.cwd,
-          messages: getHistory(),
-          setMessages: setHistory,
-          setStatus,
-          setPermissionMode: (mode) => {
-            setPermissionMode(mode);
-            permStateRef.current.mode = mode;
-            savePermissions(props.cwd, permStateRef.current);
-          },
-          setProvider: (name) => {
-            // Display-only. Persistence already happened in useProvider
-            // (provider-commands) with the correct per-layer write; saving the
-            // MERGED config here used to leak user values — including real API
-            // keys — into the project's .facode/config.json.
-            setActiveProvider(name);
-            setStatus(`Provider: ${name}`);
-          },
-          permissionMode,
-          compact: async () => {
-            await compactSession(props.sessionId, 6, (msgs) =>
-              summarizeMessages(msgs, props.cwd)
-            );
-            setHistory(loadSession(props.sessionId));
-          },
-          exit: () => exit(),
-        });
-        if (out) {
-          // Display slash command response in chat history as system message
-          const msg: Message = {
-            role: "assistant",
-            content: out,
-          };
-          const next = [...getHistory(), { role: "user", content: text } as Message, msg];
-          setHistory(next);
-          persistNew(next);
-          setStatus("Ready");
-        }
-        // Slash commands may change the provider (/provider use) or the model
-        // (/model <name>): re-read the config so the status line shows the
-        // active pair live.
-        const fresh = loadConfig(props.cwd);
-        setActiveProvider(
-          props.provider ?? fresh.activeProvider ?? fresh.provider ?? "openai"
-        );
-        setActiveModel(resolveProviderOptions(fresh).model || fresh.model || "");
+        await runSlash(text);
       } catch (e: any) {
         setStatus(`Error: ${e?.message ?? e}`);
       }
@@ -338,8 +413,57 @@ export function TuiApp(props: TuiAppProps) {
         onSubmit={handleSubmit}
         placeholder="Ask FA Code... (/ for commands, Enter to submit)"
         history={promptHistory}
-        isActive={!pendingApproval}
+        isActive={!pendingApproval && !overlay}
       />
+
+      {/* In-chat pickers/forms. They own the keyboard while open — the input box
+          is deactivated above — and persist through runSlash/submitProviderForm. */}
+      {overlay?.kind === "model" && (
+        <ModelPicker
+          cwd={props.cwd}
+          provider={overlay.provider}
+          currentModel={activeModel}
+          onSelect={(model) => {
+            setOverlay(null);
+            runSlash(`/model ${model}`).catch((e: any) =>
+              setStatus(`Error: ${e?.message ?? e}`)
+            );
+          }}
+          onCancel={closeOverlay}
+        />
+      )}
+
+      {overlay?.kind === "provider-list" && (
+        <SelectList
+          title="Select a provider"
+          items={providerOptions.map((p) => ({
+            label: p.name,
+            badge:
+              [p.active ? "active" : "", p.builtin ? "built-in" : ""]
+                .filter(Boolean)
+                .join(" ") || undefined,
+            detail: `${p.baseURL}${p.model ? `  model: ${p.model}` : ""}`,
+          }))}
+          initialIndex={Math.max(0, providerOptions.findIndex((p) => p.active))}
+          emptyText="No providers configured — use /provider add."
+          onSelect={(i) => {
+            const picked = providerOptions[i];
+            setOverlay(null);
+            runSlash(`/provider use ${picked.name}`).catch((e: any) =>
+              setStatus(`Error: ${e?.message ?? e}`)
+            );
+          }}
+          onCancel={() => closeOverlay()}
+        />
+      )}
+
+      {overlay?.kind === "provider-form" && (
+        <ProviderForm
+          prefillName={overlay.prefillName}
+          onCancel={() => setOverlay(null)}
+          onSubmit={submitProviderForm}
+        />
+      )}
 
       {pendingApproval && (
         <PermissionPrompt
