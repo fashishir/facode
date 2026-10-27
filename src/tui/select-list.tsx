@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 
 export interface SelectItem {
@@ -42,20 +42,28 @@ export function SelectList({
   onSelect,
   onCancel,
 }: SelectListProps) {
-  const [index, setIndex] = useState(() =>
-    Math.min(Math.max(0, initialIndex), Math.max(0, items.length - 1))
-  );
+  const clamp = (i: number) => Math.min(Math.max(0, i), Math.max(0, items.length - 1));
+  const [index, setIndex] = useState(() => clamp(initialIndex));
+  // Ink can deliver several keys before React commits a render (fast presses,
+  // loaded machine). The handler must act on the latest selection, not the one
+  // captured by the last render, or Enter picks the previous row.
+  const indexRef = useRef(index);
+  const moveTo = (next: number) => {
+    const clamped = clamp(next);
+    indexRef.current = clamped;
+    setIndex(clamped);
+  };
 
   useInput(
     (_input, key) => {
       if (key.escape) {
         onCancel?.();
       } else if (key.return) {
-        if (items.length) onSelect?.(index);
+        if (items.length) onSelect?.(Math.min(indexRef.current, items.length - 1));
       } else if (key.upArrow) {
-        setIndex((i) => Math.max(0, i - 1));
+        moveTo(indexRef.current - 1);
       } else if (key.downArrow) {
-        setIndex((i) => Math.min(items.length - 1, i + 1));
+        moveTo(indexRef.current + 1);
       }
     },
     { isActive }

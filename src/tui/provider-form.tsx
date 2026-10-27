@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { validateProviderInput } from "@/config";
 
@@ -92,20 +92,38 @@ export function ProviderForm({ prefillName = "", onCancel, onSubmit }: ProviderF
   const [activeIndex, setActiveIndex] = useState(prefillName ? 1 : 0);
   const [error, setError] = useState<{ field: FieldKey; message: string } | null>(null);
 
+  // Same reasoning as SelectList: keys can arrive faster than React commits a
+  // render, so the handler keeps its own mirrors and never reads stale state.
+  const valuesRef = useRef(values);
+  const activeIndexRef = useRef(activeIndex);
+
   const activeField = FIELDS[activeIndex].key;
 
+  const setField = (field: FieldKey, value: string) => {
+    const next = { ...valuesRef.current, [field]: value };
+    valuesRef.current = next;
+    setValues(next);
+  };
+
+  const goTo = (i: number) => {
+    const next = Math.min(Math.max(0, i), FIELDS.length - 1);
+    activeIndexRef.current = next;
+    setActiveIndex(next);
+  };
+
   const trySubmit = () => {
-    const problem = validateProviderForm(values);
+    const current = valuesRef.current;
+    const problem = validateProviderForm(current);
     if (problem) {
       setError(problem);
-      setActiveIndex(FIELDS.findIndex((f) => f.key === problem.field));
+      goTo(FIELDS.findIndex((f) => f.key === problem.field));
       return;
     }
     onSubmit({
-      name: values.name.trim(),
-      baseURL: values.baseURL.trim(),
-      apiKey: values.apiKey.trim(),
-      model: values.model.trim(),
+      name: current.name.trim(),
+      baseURL: current.baseURL.trim(),
+      apiKey: current.apiKey.trim(),
+      model: current.model.trim(),
     });
   };
 
@@ -115,27 +133,29 @@ export function ProviderForm({ prefillName = "", onCancel, onSubmit }: ProviderF
       return;
     }
     if (key.return) {
-      if (activeIndex === FIELDS.length - 1) trySubmit();
-      else setActiveIndex((i) => i + 1);
+      if (activeIndexRef.current === FIELDS.length - 1) trySubmit();
+      else goTo(activeIndexRef.current + 1);
       return;
     }
     if (key.tab || key.downArrow) {
-      setActiveIndex((i) => Math.min(FIELDS.length - 1, i + 1));
+      goTo(activeIndexRef.current + 1);
       return;
     }
     if (key.upArrow) {
-      setActiveIndex((i) => Math.max(0, i - 1));
+      goTo(activeIndexRef.current - 1);
       return;
     }
     if (key.backspace || key.delete) {
       setError(null);
-      setValues((v) => ({ ...v, [activeField]: v[activeField].slice(0, -1) }));
+      const field = FIELDS[activeIndexRef.current].key;
+      setField(field, valuesRef.current[field].slice(0, -1));
       return;
     }
     if (key.ctrl || key.meta) return;
     if (input) {
       setError(null);
-      setValues((v) => ({ ...v, [activeField]: v[activeField] + input }));
+      const field = FIELDS[activeIndexRef.current].key;
+      setField(field, valuesRef.current[field] + input);
     }
   });
 
