@@ -11,6 +11,7 @@
     "bin",
     "dist",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
@@ -20,7 +21,8 @@
     "start": "node bin/facode.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build && npm test"
+    "prepack": "npm run build",
+    "prepublishOnly": "npm test"
   },
   "engines": {
     "node": ">=20"
@@ -36,6 +38,14 @@
   ],
   "author": "fashishir",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fashishir/facode.git"
+  },
+  "homepage": "https://github.com/fashishir/facode#readme",
+  "bugs": {
+    "url": "https://github.com/fashishir/facode/issues"
+  },
   "imports": {
     "#agent/*": "./dist/agent/*",
     "#tools/*": "./dist/tools/*",

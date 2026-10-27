@@ -38,6 +38,9 @@ src/
     input.tsx     Input box (owns its value state; slash menu, history nav)
     permission.tsx Permission prompt (allow/deny/always)
     permission-prompt.tsx Interactive [y/a/d/p] approvals with diff previews
+    select-list.tsx   Arrow-key list overlay (windowed; both pickers use it)
+    model-picker.tsx  Endpoint model chooser for /model pick
+    provider-form.tsx Guided custom-provider form for /provider add
     status.tsx    Status line (model, cwd, token count, permission mode)
     status-line.tsx Animated status line (spinner, mode badge, REA status)
     theme.ts      Color tokens
@@ -196,6 +199,28 @@ src/
   `addProvider` gained `force?: boolean` — `provider add ... --force` overwrites;
   without it the refusal lists all three remediations (remove / provider set /
   add --force).
+- **Interactive provider/model overlays (TUI)**: the flows that only existed as
+  readline prompts now work *inside* the chat box — `interactiveAddProvider` /
+  `pickModel` cannot run under Ink (Ink owns stdin), which is why `/model pick`
+  used to just print a list. `/model pick` opens an arrow-key model chooser,
+  `/provider use` with no name opens a provider picker, `/provider add` with no
+  fields opens a guided form. Slash commands stay the single source of truth: the
+  optional `CommandContext.tui` (`TuiHooks`) only *opens* an overlay, and the
+  choice is fed back through `runSlash()` / `addProvider()` in `app.tsx`, so
+  persistence has exactly one code path (`/provider use <name>`, `/model <name>`).
+  Without `ctx.tui` (bare mode, non-TTY, CLI subcommands) every command keeps its
+  text output — no behavior change, and `/model pick` still falls back to
+  `listProviderModels` + a pointer at `facode model set --pick`.
+  Pieces: `src/tui/select-list.tsx` (windowed list, reused by both pickers),
+  `src/tui/model-picker.tsx` (uses the new `getModelChoices()` — free-first,
+  pre-highlights the configured model), `src/tui/provider-form.tsx` (4 fields,
+  `validateProviderForm()` reuses `validateProviderInput` for name/URL and adds the
+  `env:VAR` checks), `providerChoices()` feeds the provider picker, and
+  `resolveModelTarget()` is now shared by `pickModel` and `getModelChoices` so all
+  pickers target the same endpoint. Gotchas: the input box must go
+  `isActive={false}` whenever an overlay is open (otherwise ↑/↓/Enter are swallowed
+  by the chat input); the form's transcript echo masks the key with `maskKey()` —
+  the field itself is on screen while typing, so never echo the raw value.
 - **setProvider is display-only (v0.4.2)**: the TUI and bare-mode `setProvider`
   callbacks used to re-save the MERGED config into the project layer — leaking
   user values (and real API keys) into `.facode/config.json` on every
@@ -250,3 +275,4 @@ src/
 - [x] Provider/model management (v0.4.0): `facode provider add|list|use|test|remove` + `facode model set|show` subcommands, `/provider add|list|use|remove|test` + settable `/model` slash commands, interactive `provider add` prompts (TTY), `--api-key-env` secret references, masked key display, "No model configured" guard, loadConfig deep-merge for record fields, 92 tests.
 - [x] Model discovery (v0.4.1): `facode provider models <name>` + `facode model set --pick [provider]` (interactive numbered chooser, free models first), `/provider models` + `/model pick` slash commands, shared `fetchEndpointModels()` (no chat-quota cost), verified live against Token Harbor (73 models, 4 free).
 - [x] Provider updates (v0.4.2): `facode provider set <name>` (partial update of base URL / key / model, built-in refusal, env-ref rotation) + `provider add --force` overwrite, `/provider set` slash command, TUI+bare `setProvider` made display-only (fixes merged-config/keys leaking into project config), live model+provider segments in the TUI status line.
+- [x] Interactive provider/model overlays in the TUI: arrow-key `/model pick` chooser, `/provider use` picker, guided `/provider add` form (Ink-native, since the readline prompts cannot run there), `CommandContext.tui` hooks, shared `resolveModelTarget()`, `getModelChoices()`, `providerChoices()`, plus component and end-to-end chat-box regression tests.

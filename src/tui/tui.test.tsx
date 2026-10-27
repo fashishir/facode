@@ -18,6 +18,22 @@ import { TuiApp } from "./app";
 
 const tick = () => new Promise<void>((r) => setTimeout(r, 60));
 
+// Ink renders, effects, and async config writes settle on their own schedule.
+// A fixed sleep passes in isolation but flakes when the whole suite runs in
+// parallel, so overlay tests poll for the state they need instead.
+const waitFor = async (
+  predicate: () => boolean | Promise<boolean>,
+  what = "condition",
+  timeoutMs = 3000
+): Promise<void> => {
+  const started = Date.now();
+  for (;;) {
+    if (await predicate()) return;
+    if (Date.now() - started > timeoutMs) throw new Error(`waitFor timed out: ${what}`);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+};
+
 // Strip ANSI/VT escape sequences (colors, sync markers ?2026h, cursor ?25l...)
 // so assertions match visible text only.
 const stripAnsi = (s: string) => s.replace(/\u001b\[[0-9;?]*[a-zA-Z]/g, "");
@@ -556,7 +572,10 @@ describe("TuiApp provider/model overlays", () => {
     streams.stdin.write("/provider use");
     await tick();
     streams.stdin.write("\r");
-    await tick();
+    await waitFor(
+      () => stripAnsi(streams.getOut()).includes("Select a provider"),
+      "provider picker to open"
+    );
     const opened = stripAnsi(streams.getOut());
     expect(opened).toContain("Select a provider");
     // Built-ins first, then the custom providers from config.
@@ -570,14 +589,17 @@ describe("TuiApp provider/model overlays", () => {
     }
     streams.stdin.write("\r");
 
-    let cfg: any = {};
-    for (let i = 0; i < 30 && cfg.activeProvider !== "alpha"; i++) {
-      await tick();
-      cfg = await readJson(join(userDir, "config.json"));
-    }
+    await waitFor(
+      async () => (await readJson(join(userDir, "config.json"))).activeProvider === "alpha",
+      "active provider to be persisted"
+    );
+    const cfg: any = await readJson(join(userDir, "config.json"));
     expect(cfg.activeProvider).toBe("alpha");
     // The switch is reported in the transcript, through the normal command path.
-    expect(stripAnsi(streams.getOut())).toContain('Active provider set to "alpha"');
+    await waitFor(
+      () => stripAnsi(streams.getOut()).includes('Active provider set to "alpha"'),
+      "switch confirmation in the transcript"
+    );
     instance.unmount();
   });
 
@@ -590,7 +612,10 @@ describe("TuiApp provider/model overlays", () => {
     streams.stdin.write("/provider add");
     await tick();
     streams.stdin.write("\r");
-    await tick();
+    await waitFor(
+      () => stripAnsi(streams.getOut()).includes("Add a custom provider"),
+      "provider form to open"
+    );
     expect(stripAnsi(streams.getOut())).toContain("Add a custom provider");
 
     // Fill the form: name → URL → key → (model) → submit.

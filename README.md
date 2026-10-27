@@ -75,7 +75,7 @@ facode provider set myproxy --api-key-env MY_PROXY_KEY  # rotate to an env refer
 # Registering a name that already exists is refused; overwrite explicitly
 facode provider add myproxy --base-url https://my.proxy/v1 --api-key sk-... --force
 
-# NEW: discover models from the endpoint itself (no chat-quota cost)
+# Discover models from the endpoint itself (no chat-quota cost)
 facode provider models myproxy   # lists every model; `:free` ones grouped first
 facode model set --pick myproxy  # numbered interactive chooser (free models first)
 facode model set --pick          # same, for the active provider
@@ -85,10 +85,13 @@ facode model show                # resolved model / provider / base URL
 ```
 
 Add `--scope project` to any of the above to write the project's
-`.facode/config.json` instead of the user config. Inside the TUI:
-`/provider models <name>` lists models and `/model pick` renders the list for
-the active provider (the interactive chooser is CLI-only, since the TUI owns
-stdin).
+`.facode/config.json` instead of the user config.
+
+Inside the TUI the same operations have arrow-key overlays:
+`/model pick` opens a model chooser for the active provider, `/provider use`
+with no name opens a provider picker, and `/provider add` with no fields opens
+a guided form. Bare mode and non-TTY runs fall back to plain text — `/model
+pick` prints the list and points at `facode model set --pick`.
 
 Minimal user config example (`~/.facode/config.json`):
 
