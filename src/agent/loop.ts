@@ -3,6 +3,7 @@ import type { Tool, ToolContext } from "@/tools/types";
 import { ToolRegistry } from "@/tools/registry";
 import { createCompletion, getProviderOptions } from "@/agent/provider";
 import { loadConfig } from "@/config";
+import { getUsageSnapshot } from "@/agent/usage";
 import { toInputSchema } from "@/tools/types";
 
 export interface LoopOptions {
@@ -31,6 +32,12 @@ export interface LoopOptions {
    * model hit a quota/rate-limit error). Lets the host surface it in the UI.
    */
   onModelSwitch?: (from: string, to: string) => void;
+  /**
+   * Called after every provider request with the session's per-model usage
+   * snapshot, so hosts can show live token usage (status line). Tracking
+   * only — usage never limits or blocks any request.
+   */
+  onUsage?: (snapshot: import("@/agent/usage").ModelUsageEntry[]) => void;
   /** Called when the turn ends (content + tools done). */
   onTurnEnd?: (messages: Message[]) => void;
   /** Abort signal for the whole loop. */
@@ -62,6 +69,7 @@ export async function runAgentLoop(
     onToolCall,
     onTurnEnd,
     onModelSwitch,
+    onUsage,
     signal,
   } = opts;
 
@@ -121,6 +129,7 @@ export async function runAgentLoop(
       onReasoningDelta,
       onToolCallDelta: onToolCall as (tc: Partial<any>) => void,
     });
+    if (onUsage) onUsage(getUsageSnapshot());
 
     // Preserve the assistant message INCLUDING tool_calls — the OpenAI tool
     // protocol requires tool results to follow an assistant message that

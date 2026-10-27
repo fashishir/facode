@@ -19,6 +19,8 @@ import { executeSlash } from "@/cli";
 import { defaultSystemPrompt, loadConfig, maskKey, resolveProviderOptions } from "@/config";
 import { loadPermissions, savePermissions, decide, type PermissionMode } from "@/permissions";
 import { addProvider, providerChoices } from "@/provider-commands";
+import { TOKEN_BUDGET_PER_MODEL, budgetRatio, type ModelUsageEntry } from "@/agent/usage";
+import { formatTokens } from "@/utils";
 
 export interface TuiAppProps {
   cwd: string;
@@ -83,10 +85,26 @@ export function TuiApp(props: TuiAppProps) {
   );
   // Auto-failover can switch the active model mid-turn when the previous one
   // hits a quota/rate-limit error; the status line reflects the current model.
+  const [modelUsage, setModelUsage] = useState<ModelUsageEntry[]>([]);
   const onModelSwitch = useCallback((from: string, to: string) => {
     setActiveModel(to);
     setStatus(`Switched model (quota): ${from} → ${to}`);
   }, []);
+
+  // Per-model token usage (tracking only — never limits a request). Shown
+  // live for the active model in the status line; /usage shows all models.
+  const onUsage = useCallback((snapshot: ModelUsageEntry[]) => {
+    setModelUsage(snapshot);
+  }, []);
+  const activeModelEntry = modelUsage.find(
+    (e) => e.model.toLowerCase() === activeModel.toLowerCase()
+  );
+  const usedByActiveModel = activeModelEntry
+    ? activeModelEntry.inputTokens + activeModelEntry.outputTokens
+    : modelUsage.reduce((n, e) => n + e.inputTokens + e.outputTokens, 0);
+  const usageRatio = activeModelEntry
+    ? budgetRatio(activeModelEntry)
+    : modelUsage.reduce((n, e) => n + budgetRatio(e), 0);
 
   const getHistory = props.getHistory ?? (() => historyRef.current);
 
@@ -365,6 +383,7 @@ export function TuiApp(props: TuiAppProps) {
           setStatus(result.error ? `${tool} failed` : `${tool} finished`);
         },
         onModelSwitch,
+        onUsage,
         onTurnEnd: (msgs: Message[]) => {
           // Clear the live-stream area first, in the same batch as the history
           // update, so the finished message appears exactly once (in the
@@ -485,6 +504,8 @@ export function TuiApp(props: TuiAppProps) {
         model={activeModel || undefined}
         provider={activeProvider}
         reaStatus={mcpReady ? `● ${toolCount} tools` : "○ connecting"}
+        usage={modelUsage.length ? `${formatTokens(usedByActiveModel)}/${formatTokens(TOKEN_BUDGET_PER_MODEL)}` : undefined}
+        usageRatio={usageRatio}
       />
     </Box>
   );

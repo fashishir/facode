@@ -15,6 +15,10 @@ export interface StatusLineProps {
   model?: string;
   /** Active provider name. */
   provider?: string;
+  /** Session token usage text for the active model, e.g. "19.1k/1.0M". */
+  usage?: string;
+  /** Usage as a ratio of the 1M tracking budget (drives the segment color). */
+  usageRatio?: number;
 }
 
 export function StatusLine({
@@ -25,6 +29,8 @@ export function StatusLine({
   reaStatus,
   model,
   provider,
+  usage,
+  usageRatio = 0,
 }: StatusLineProps) {
   const [frame, setFrame] = useState(0);
 
@@ -80,6 +86,13 @@ export function StatusLine({
           <>
             <Text color="gray">REA: </Text>
             <Text color={reaStatus.startsWith("●") ? "cyan" : "yellow"}>{reaStatus}</Text>
+            <Text color="gray.dim"> │ </Text>
+          </>
+        )}
+        {usage && (
+          <>
+            <Text color="gray">usage: </Text>
+            <Text color={usageRatio >= 1 ? "magenta" : usageRatio >= 0.8 ? "yellow" : "gray"}>{usage}</Text>
             <Text color="gray.dim"> │ </Text>
           </>
         )}

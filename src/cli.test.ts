@@ -44,6 +44,28 @@ describe("Slash Commands", () => {
     expect(resTokens).toBe(resCost);
   });
 
+  it("should show per-model usage on /usage (tracking only, 1M budget per model)", async () => {
+    const usage = await import("@/agent/usage");
+    usage.resetUsage();
+
+    // Empty state
+    const resEmpty = await executeSlash("/usage", dummyCtx);
+    expect(resEmpty).toContain("No token usage recorded yet");
+
+    // After recording usage
+    usage.recordUsage("deepseek-v4.1-flash:free", { inputTokens: 700_000, outputTokens: 300_000 });
+    usage.recordUsage("gpt-4o", { inputTokens: 100, outputTokens: 50 });
+    const res = await executeSlash("/usage", dummyCtx);
+    expect(res).toContain("deepseek-v4.1-flash:free");
+    expect(res).toContain("(100%)");
+    expect(res).toContain("TOTAL");
+    expect(res).toContain("1,000,000");
+    expect(res).toContain("No usage limit");
+
+    // /cost embeds the same table
+    usage.resetUsage();
+  });
+
   it("should handle /permissions command", async () => {
     const resInfo = await executeSlash("/permissions", dummyCtx);
     expect(resInfo).toContain("Current permission mode:");

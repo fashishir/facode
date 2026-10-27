@@ -11,6 +11,8 @@ vi.mock("openai", () => {
     /** Model ids that should fail (with the error to throw). */
     failing: new Map<string, { message: string; status?: number }>(),
     streamContent: "ok",
+    /** When set, the stream emits a final usage chunk (include_usage honored). */
+    usage: undefined as { prompt_tokens: number; completion_tokens: number } | undefined,
   };
   return {
     default: class MockOpenAI {
@@ -30,6 +32,9 @@ vi.mock("openai", () => {
             }
             return (async function* () {
               yield { choices: [{ delta: { content: state.streamContent } }] };
+              if (state.usage) {
+                yield { choices: [], usage: state.usage };
+              }
             })();
           },
         },
@@ -89,6 +94,7 @@ describe("createCompletion auto-failover", () => {
     OpenAI.__state.models = [];
     OpenAI.__state.failing = new Map();
     OpenAI.__state.streamContent = "ok";
+    OpenAI.__state.usage = undefined;
     return { mod, state: OpenAI.__state };
   }
 
@@ -248,5 +254,88 @@ describe("createCompletion auto-failover", () => {
 
     expect(result.content).toBe("from-free");
     expect(switches).toEqual([["gpt-5.5", "beam-free"]]);
+  });
+});
+
+describe("createCompletion usage accounting", () => {
+  beforeEach(() => vi.resetModules());
+
+  async function setup() {
+    const mod = await import("@/agent/provider");
+    const usage = await import("@/agent/usage");
+    const OpenAI = (await import("openai")).default as any;
+    OpenAI.__state.models = [];
+    OpenAI.__state.failing = new Map();
+    OpenAI.__state.streamContent = "ok";
+    OpenAI.__state.usage = undefined;
+    usage.resetUsage();
+    return { mod, usage, state: OpenAI.__state };
+  }
+
+  it("uses server-reported usage when the stream provides it", async () => {
+    const { mod, usage, state } = await setup();
+    state.usage = { prompt_tokens: 1234, completion_tokens: 567 };
+
+    const result = await mod.createCompletion(
+      [{ role: "user", content: "hi" }] as Message[],
+      { baseURL: "https://api.example.com/v1", model: "deepseek-v4.1-flash:free" },
+      []
+    );
+
+    expect(result.model).toBe("deepseek-v4.1-flash:free");
+    const snap = usage.getUsageSnapshot();
+    expect(snap).toHaveLength(1);
+    expect(snap[0]).toMatchObject({
+      model: "deepseek-v4.1-flash:free",
+      inputTokens: 1234,
+      outputTokens: 567,
+      requests: 1,
+      estimated: false,
+    });
+  });
+
+  it("falls back to a character estimate — tracking only, nothing is blocked", async () => {
+    const { mod, usage, state } = await setup();
+    state.streamContent = "abcd"; // 4 chars → ~1 output token
+
+    const result = await mod.createCompletion(
+      [{ role: "user", content: "x".repeat(16) }] as Message[], // 16 chars → ~4 input tokens
+      { baseURL: "https://api.example.com/v1", model: "gpt-4o" },
+      []
+    );
+
+    expect(result.model).toBe("gpt-4o");
+    const [e] = usage.getUsageSnapshot();
+    expect(e.inputTokens).toBe(4);
+    expect(e.outputTokens).toBe(1);
+    expect(e.estimated).toBe(true);
+  });
+
+  it("counts usage under the failover model it actually served", async () => {
+    const { mod, usage, state } = await setup();
+    state.models = ["deepseek-v4.1-flash:free", "nemotron:free"];
+    state.failing.set("deepseek-v4.1-flash:free", {
+      message: "rate limit exceeded",
+      status: 429,
+    });
+    state.usage = { prompt_tokens: 10, completion_tokens: 5 };
+
+    await mod.createCompletion(
+      [{ role: "user", content: "hi" }] as Message[],
+      {
+        baseURL: "https://api.example.com/v1",
+        model: "deepseek-v4.1-flash:free",
+        failover: { candidates: [], cfg: failoverCfg() },
+      },
+      []
+    );
+
+    const snap = usage.getUsageSnapshot();
+    expect(snap).toHaveLength(1);
+    expect(snap[0]).toMatchObject({
+      model: "nemotron:free",
+      inputTokens: 10,
+      outputTokens: 5,
+    });
   });
 });

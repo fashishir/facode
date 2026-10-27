@@ -20,7 +20,70 @@ import {
 import { stdin } from "node:process";
 import { listSessions, loadSession, createSession, compactSession } from "@/session/store";
 import type { Message } from "@/agent/types";
+import {
+  TOKEN_BUDGET_PER_MODEL,
+  budgetRatio,
+  getUsageSnapshot,
+} from "@/agent/usage";
 import { execFileSync } from "node:child_process";
+
+/** Per-model token usage table (tracking only — no request is ever blocked). */
+function formatUsageTable(): string {
+  const entries = getUsageSnapshot();
+  if (!entries.length) {
+    return "No token usage recorded yet — send a prompt first.";
+  }
+
+  const nameW = Math.max("Model".length, ...entries.map((e) => e.model.length));
+  const fmt = (n: number) => n.toLocaleString("en-US");
+  const numW = Math.max("Input".length, ...entries.map((e) => Math.max(fmt(e.inputTokens).length, fmt(e.inputTokens + e.outputTokens).length)));
+  const reqW = Math.max("Requests".length, ...entries.map((e) => String(e.requests).length));
+
+  const bar = (ratio: number): string => {
+    const width = 10;
+    const filled = Math.min(width, Math.max(0, Math.round(Math.min(ratio, 1) * width)));
+    return `[${"█".repeat(filled)}${" ".repeat(width - filled)}]`;
+  };
+
+  const row = (name: string, inp: string, out: string, req: string, budget: string) =>
+    `  ${name.padEnd(nameW)}  ${inp.padStart(numW)}  ${out.padStart(numW)}  ${req.padStart(reqW)}  ${budget}`;
+
+  const header = row("Model", "Input", "Output", "Requests", `Used / ${fmt(TOKEN_BUDGET_PER_MODEL)} budget`);
+  const sep = "-".repeat(header.length);
+  const lines: string[] = [sep, header, sep];
+
+  for (const e of entries) {
+    const used = e.inputTokens + e.outputTokens;
+    const ratio = budgetRatio(e);
+    const pct = ratio < 0.1 ? (ratio * 100).toFixed(1) : Math.round(ratio * 100).toString();
+    lines.push(
+      row(
+        e.model,
+        fmt(e.inputTokens),
+        fmt(e.outputTokens),
+        String(e.requests),
+        `${fmt(used)} (${pct}%) ${bar(ratio)}`
+      )
+    );
+  }
+
+  lines.push(
+    sep,
+    row(
+      "TOTAL",
+      fmt(entries.reduce((n, e) => n + e.inputTokens, 0)),
+      fmt(entries.reduce((n, e) => n + e.outputTokens, 0)),
+      String(entries.reduce((n, e) => n + e.requests, 0)),
+      `each model has its own ${fmt(TOKEN_BUDGET_PER_MODEL)} budget`
+    )
+  );
+  lines.push(sep);
+  if (entries.some((e) => e.estimated)) {
+    lines.push("Usage partly estimated (endpoint did not report token counts; ~4 chars/token).");
+  }
+  lines.push("No usage limit — facode shows these counters but never blocks a request.");
+  return lines.join("\n");
+}
 
 export interface SlashCommand {
   name: string;
@@ -365,6 +428,9 @@ const BUILTINS: SlashCommand[] = [
         `Transcript size:    ${formatBytes(totalChars)}`,
         `Estimated tokens:   ~${estimatedTokens.toLocaleString()}`,
         "─────────────────────────────────────────────────────",
+        "",
+        "Token usage by model (this session):",
+        formatUsageTable(),
       ].join("\n");
     },
   },
@@ -374,6 +440,14 @@ const BUILTINS: SlashCommand[] = [
     args: "",
     async execute(args, ctx) {
       return (await BUILTINS.find((c) => c.name === "cost")?.execute(args, ctx)) ?? "";
+    },
+  },
+  {
+    name: "usage",
+    description: "Show per-model token usage against each model's 1M tracking budget",
+    args: "",
+    async execute(_args, _ctx) {
+      return formatUsageTable();
     },
   },
   {

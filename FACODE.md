@@ -240,6 +240,19 @@ src/
   `mcpServers`, `subagents` now merge key-by-key across layers (later layer wins
   per key). Regression test in `src/config.test.ts`.
 
+- **Token usage tracking (v0.4.4)**: every completion request is counted per served model in
+  `src/agent/usage.ts` (module-level Map, lifetime of the process/session). The 1M token
+  per-model budget is a **tracking reference ONLY — nothing ever blocks a request**. Real
+  usage: `stream_options: { include_usage: true }` is sent in `createStream`; endpoints that
+  reject the field are silently retried without it, and a final chunk with empty choices
+  carries `{prompt_tokens, completion_tokens}`. If the endpoint reports no usage, tokens are
+  estimated (~4 chars/token) and the entry is flagged `estimated` (shown as a note in the
+  table). Failover switches count under the model that actually served (`CompletionResult.model`).
+  User-facing: `/usage` (per-model table with input/output/requests + Used/1M % bar), `/cost`
+  and `/tokens` embed the same table below the conversation stats; the TUI status line shows
+  `usage: <used>/<1M>` for the active model (toolbar via `onUsage` in `LoopOptions`), colored
+  yellow at ≥80% and magenta at ≥100% of the budget. Counters are per-session, not persisted.
+
 ## Distribution / publishing (v0.3)
 - **npm name is `facode-cli`** (the plain `facode` name on npm is permanently taken by an
   unrelated 2022 frame-animation package "ddmy/FACode"). The **bin command stays `facode`**.

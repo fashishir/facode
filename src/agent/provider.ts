@@ -1,6 +1,7 @@
 import type OpenAI from "openai";
 import type { Role, Message, ToolCall, StreamCallbacks } from "@/agent/types";
 import { toInputSchema } from "@/tools/types";
+import { recordUsage, type TokenUsage } from "@/agent/usage";
 import {
   isFreeModel,
   loadConfig,
@@ -44,6 +45,8 @@ export interface CompletionResult {
   content: string;
   toolCalls: ToolCall[];
   usage?: { inputTokens: number; outputTokens: number };
+  /** Model id that actually served this completion (may differ from options.model after auto-failover). */
+  model: string;
 }
 
 /**
@@ -72,7 +75,12 @@ export async function createCompletion(
 
   for (;;) {
     try {
-      return await streamCompletion(client, messages, { ...options, model: activeModel }, tools, callbacks);
+      const result = await streamCompletion(client, messages, { ...options, model: activeModel }, tools, callbacks);
+      // Usage accounting: every request is counted per served model. FA Code
+      // never blocks requests because of the per-model 1M token budget — it
+      // exists only as a tracking reference the user can inspect (/usage).
+      recordUsage(result.model, result.usage ?? undefined, estimateUsage(messages, result));
+      return result;
     } catch (e: any) {
       if (!isQuotaError(e)) throw e;
       if (candidates === null) {
@@ -98,13 +106,24 @@ async function streamCompletion(
   tools: ReturnType<typeof toInputSchema>[],
   callbacks: StreamCallbacks
 ): Promise<CompletionResult> {
-  const stream = await createStream(client, messages, options, tools);
+  const stream: AsyncIterable<any> = await createStream(client, messages, options, tools);
 
   let content = "";
   const toolCalls: Map<number, ToolCall> = new Map();
   let reasoningContent = "";
+  let usage: TokenUsage | undefined;
 
   for await (const chunk of stream) {
+    // Servers honoring stream_options.include_usage report usage on a final
+    // chunk with empty choices — capture it before the choice guard below.
+    const chunkUsage = (chunk as any).usage;
+    if (chunkUsage) {
+      usage = {
+        inputTokens: chunkUsage.prompt_tokens ?? 0,
+        outputTokens: chunkUsage.completion_tokens ?? chunkUsage.output_tokens ?? 0,
+      };
+    }
+
     const choice = chunk.choices[0];
     if (!choice) continue;
 
@@ -142,7 +161,24 @@ async function streamCompletion(
   return {
     content,
     toolCalls: Array.from(toolCalls.values()),
-    usage: undefined, // stream doesn't return usage
+    usage,
+    model: options.model,
+  };
+}
+
+/** ≈4 chars/token fallback so /usage works even on endpoints that don't report usage. */
+function estimateUsage(messages: Message[], result: CompletionResult): TokenUsage {
+  let inputChars = 0;
+  for (const m of messages) {
+    inputChars += typeof m.content === "string" ? m.content.length : JSON.stringify(m.content ?? "").length;
+  }
+  let outputChars = result.content.length + (result.toolCalls ?? []).reduce(
+    (n, tc) => n + (tc.function?.name?.length ?? 0) + (tc.function?.arguments?.length ?? 0),
+    0
+  );
+  return {
+    inputTokens: Math.round(inputChars / 4),
+    outputTokens: Math.round(outputChars / 4),
   };
 }
 
@@ -208,16 +244,30 @@ async function createStream(
   options: ProviderOptions,
   tools: ReturnType<typeof toInputSchema>[]
 ) {
+  const baseRequest = {
+    model: options.model,
+    messages: messages as any,
+    tools: tools.length ? (tools as any) : undefined,
+    tool_choice: tools.length ? ("auto" as const) : undefined,
+    stream: true as const,
+    temperature: 0.1,
+    ...(options.maxTokens && options.maxTokens < 999_999_999 ? { max_tokens: options.maxTokens } : {}),
+  };
   try {
-    return await client.chat.completions.create({
-      model: options.model,
-      messages: messages as any,
-      tools: tools.length ? (tools as any) : undefined,
-      tool_choice: tools.length ? ("auto" as const) : undefined,
-      stream: true,
-      temperature: 0.1,
-      ...(options.maxTokens && options.maxTokens < 999_999_999 ? { max_tokens: options.maxTokens } : {}),
-    });
+    // Ask the endpoint for real token usage on the final stream chunk.
+    // Strict proxies may reject the unknown field — retried below without.
+    let stream: any;
+    try {
+      stream = await (client.chat.completions.create as any)({
+        ...baseRequest,
+        stream_options: { include_usage: true },
+      });
+    } catch (se: any) {
+      const sm = se?.message ?? String(se);
+      if (!/stream_options|include_usage|unknown field|unrecognized/i.test(sm)) throw se;
+      stream = await client.chat.completions.create(baseRequest as any);
+    }
+    return stream;
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     // Surface the undici/fetch root cause (ECONNRESET, ECONNREFUSED, cert
