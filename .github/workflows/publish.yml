@@ -84,7 +84,18 @@ jobs:
         run: npm publish --provenance --access public --ignore-scripts
 
       - name: Verify registry
-        run: npm view "facode-cli@$VERSION" version dist.integrity
+        run: |
+          # npm returns from publish before the version is globally readable.
+          # Poll instead of failing the release on the propagation delay.
+          for attempt in $(seq 1 30); do
+            if npm view "facode-cli@$VERSION" version dist.integrity dist.attestations.url; then
+              exit 0
+            fi
+            echo "facode-cli@$VERSION not readable yet (attempt $attempt/30); retrying in 10s"
+            sleep 10
+          done
+          echo "::error::facode-cli@$VERSION did not become readable from the registry"
+          exit 1
 
       - name: Summary
         run: |
