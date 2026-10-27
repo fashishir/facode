@@ -34,6 +34,41 @@ const waitFor = async (
   }
 };
 
+// A frame reaching the stream does not mean the new tree's useInput hooks have
+// subscribed yet. Yield through macrotasks so React can flush passive effects
+// before the test starts typing into a freshly mounted overlay.
+const flushEffects = async (): Promise<void> => {
+  await new Promise<void>((r) => setTimeout(r, 0));
+  await new Promise<void>((r) => setImmediate(r));
+  await tick();
+};
+
+// The highlight of the newest frame (SelectList renders "❯ <label>  <detail>").
+const highlighted = (streams: ReturnType<typeof makeStreams>): string => {
+  const raw = streams.getOut();
+  const at = raw.lastIndexOf("❯");
+  if (at < 0) return "";
+  return stripAnsi(raw.slice(at, at + 240)).split("\n")[0]?.trim() ?? "";
+};
+
+// Step the list until `done()` is true, re-sending if a press was delivered
+// before the overlay subscribed. Never overshoots: it checks before each press.
+const pressUntil = async (
+  streams: ReturnType<typeof makeStreams>,
+  key: string,
+  done: () => boolean,
+  what: string,
+  max = 25
+): Promise<void> => {
+  for (let i = 0; i < max; i++) {
+    if (done()) return;
+    streams.stdin.write(key);
+    await tick();
+  }
+  if (done()) return;
+  throw new Error(`pressUntil timed out: ${what} (highlight: ${highlighted(streams)})`);
+};
+
 // Strip ANSI/VT escape sequences (colors, sync markers ?2026h, cursor ?25l...)
 // so assertions match visible text only.
 const stripAnsi = (s: string) => s.replace(/\u001b\[[0-9;?]*[a-zA-Z]/g, "");
@@ -581,12 +616,15 @@ describe("TuiApp provider/model overlays", () => {
     // Built-ins first, then the custom providers from config.
     expect(opened).toContain("alpha");
     expect(opened).toContain("https://alpha.example.com/v1");
+    await flushEffects();
 
-    // Walk down to the custom `alpha` row (5 built-ins precede it) and pick it.
-    for (let i = 0; i < 5; i++) {
-      streams.stdin.write("\u001B[B");
-      await tick();
-    }
+    // Walk down to the custom `alpha` row and pick it.
+    await pressUntil(
+      streams,
+      "\u001B[B",
+      () => highlighted(streams).startsWith("❯ alpha"),
+      "alpha to be highlighted"
+    );
     streams.stdin.write("\r");
 
     await waitFor(
@@ -617,6 +655,7 @@ describe("TuiApp provider/model overlays", () => {
       "provider form to open"
     );
     expect(stripAnsi(streams.getOut())).toContain("Add a custom provider");
+    await flushEffects();
 
     // Fill the form: name → URL → key → (model) → submit.
     streams.stdin.write("fromtui");
@@ -687,11 +726,16 @@ describe("TuiApp provider/model overlays", () => {
     expect(opened).toContain("alpha-free:free");
     await waitFor(() => fetchMock.mock.calls.length > 0, "models request");
     expect(fetchMock.mock.calls[0][0]).toBe("https://alpha.example.com/v1/models");
+    await flushEffects();
 
     // The current model is highlighted on open (it is the second row, since
-    // free ids sort first) — up one row to the free model, then select it.
-    streams.stdin.write("\u001B[A");
-    await tick();
+    // free ids sort first) — up to the free model, then select it.
+    await pressUntil(
+      streams,
+      "\u001B[A",
+      () => highlighted(streams).startsWith("❯ alpha-free:free"),
+      "free model to be highlighted"
+    );
     streams.stdin.write("\r");
     await waitFor(
       async () => (await readJson(join(userDir, "config.json"))).model === "alpha-free:free",
