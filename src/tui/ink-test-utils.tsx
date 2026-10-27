@@ -6,6 +6,11 @@ import { render as inkRender } from "ink";
 // (PassThrough with isTTY=true), so components can be smoke-tested without a
 // real terminal. Ink's render options accept custom streams but the public
 // types are stricter, hence the casts here.
+//
+// `interactive: true` is required: Ink 8 defaults to non-interactive mode when
+// `CI` is set, and non-interactive mode defers the frame until unmount. The
+// assertions read the live stream, so on GitHub Actions every render looked
+// empty without this override.
 
 export type InkInstance = Instance;
 
@@ -23,5 +28,6 @@ export function render(
     stdin: options.stdin as any,
     exitOnCtrlC: false,
     patchConsole: false,
+    interactive: true,
   });
 }
