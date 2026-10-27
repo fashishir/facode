@@ -633,16 +633,20 @@ describe("TuiApp provider/model overlays", () => {
     await tick();
     streams.stdin.write("\r");
 
-    let cfg: any = {};
-    for (let i = 0; i < 30 && !cfg.providers?.fromtui; i++) {
-      await tick();
-      cfg = await readJson(join(userDir, "config.json"));
-    }
+    await waitFor(
+      async () => Boolean((await readJson(join(userDir, "config.json"))).providers?.fromtui),
+      "provider to be written to user config"
+    );
+    const cfg: any = await readJson(join(userDir, "config.json"));
     expect(cfg.providers?.fromtui).toEqual({
       baseURL: "https://tui.example.com/v1",
       apiKey: "sk-tui-key-1234",
       model: "",
     });
+    await waitFor(
+      () => stripAnsi(streams.getOut()).includes('Provider "fromtui" added'),
+      "add confirmation in the transcript"
+    );
     const out = stripAnsi(streams.getOut());
     expect(out).toContain('Provider "fromtui" added');
     // The transcript echo masks the key (the form's own field is on screen while
@@ -674,10 +678,14 @@ describe("TuiApp provider/model overlays", () => {
     streams.stdin.write("/model pick");
     await tick();
     streams.stdin.write("\r");
-    await tick();
+    await waitFor(
+      () => stripAnsi(streams.getOut()).includes("Select a model"),
+      "model picker to open"
+    );
     const opened = stripAnsi(streams.getOut());
     expect(opened).toContain("Select a model");
     expect(opened).toContain("alpha-free:free");
+    await waitFor(() => fetchMock.mock.calls.length > 0, "models request");
     expect(fetchMock.mock.calls[0][0]).toBe("https://alpha.example.com/v1/models");
 
     // The current model is highlighted on open (it is the second row, since
@@ -685,11 +693,11 @@ describe("TuiApp provider/model overlays", () => {
     streams.stdin.write("\u001B[A");
     await tick();
     streams.stdin.write("\r");
-    let cfg: any = {};
-    for (let i = 0; i < 30 && cfg.model !== "alpha-free:free"; i++) {
-      await tick();
-      cfg = await readJson(join(userDir, "config.json"));
-    }
+    await waitFor(
+      async () => (await readJson(join(userDir, "config.json"))).model === "alpha-free:free",
+      "selected model to be persisted"
+    );
+    const cfg: any = await readJson(join(userDir, "config.json"));
     expect(cfg.model).toBe("alpha-free:free");
     instance.unmount();
   });
