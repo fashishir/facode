@@ -2,7 +2,7 @@
 
 All notable changes to `facode-cli` are documented here.
 
-## Unreleased
+## 0.4.3 — 2026-10-27
 
 ### Fixed
 
