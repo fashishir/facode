@@ -24,6 +24,9 @@
     "prepack": "npm run build",
     "prepublishOnly": "npm test"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=20"
   },
